@@ -2,6 +2,7 @@ package filtrx_test
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/zkrebbekx/filtrx"
 )
@@ -61,6 +62,22 @@ func ExampleAnd() {
 	fmt.Println(sql)
 	// Output:
 	// (`status` = ? AND (`age` > ? OR `deleted_at` IS NULL))
+}
+
+// Fill a filter straight from a REST query string.
+func ExampleBind() {
+	var f userFilter
+	vals, _ := url.ParseQuery("status=active&age_gte=18&age_lt=65&role=admin&role=mod")
+
+	_ = filtrx.Bind(vals, &f)
+	cond, _ := filtrx.Where(f)
+	sql, args := filtrx.Build(cond, filtrx.Postgres)
+
+	fmt.Println(sql)
+	fmt.Println(args...)
+	// Output:
+	// ("status" = $1 AND "age" >= $2 AND "age" < $3 AND "role" IN ($4, $5))
+	// active 18 65 admin mod
 }
 
 // Resolve pagination into a limit and offset.

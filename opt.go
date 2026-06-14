@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"reflect"
 )
 
 // Opt is an optional value used in filter structs. Its zero value is unset,
@@ -76,6 +77,17 @@ func (o *Opt[T]) UnmarshalJSON(b []byte) error {
 type setter interface {
 	isSet() bool
 	value() any
+}
+
+// setString parses a query-string value into the contained value and marks the
+// Opt set, implementing stringSetter for Bind. Parsing follows the concrete
+// type T (primitives plus time.Time).
+func (o *Opt[T]) setString(s string) error {
+	if err := parseScalar(reflect.ValueOf(&o.val).Elem(), s); err != nil {
+		return err
+	}
+	o.set = true
+	return nil
 }
 
 // Scan implements sql.Scanner so an Opt may also receive a value from a row,

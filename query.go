@@ -80,6 +80,42 @@ func (q *Query) OrderByDesc(col string) *Query {
 	return q
 }
 
+// Sort appends ordering parsed from a request, safely. spec is a comma-separated
+// list of sort keys such as "name,-created"; a leading "-" means descending. Only
+// keys present in allowed are accepted, and the mapped value is the real column —
+// so a sort parameter from a request can never inject a column name. An unknown
+// key defers an error that List surfaces.
+//
+//	q.Sort(r.URL.Query().Get("sort"), map[string]string{
+//		"name":    "name",
+//		"created": "created_at",
+//	})
+func (q *Query) Sort(spec string, allowed map[string]string) *Query {
+	if spec == "" {
+		return q
+	}
+	for _, key := range strings.Split(spec, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		desc := false
+		switch key[0] {
+		case '-':
+			desc, key = true, key[1:]
+		case '+':
+			key = key[1:]
+		}
+		col, ok := allowed[key]
+		if !ok {
+			q.err = fmt.Errorf("%w: sort key %q is not allowed", ErrCompile, key)
+			return q
+		}
+		q.order = append(q.order, orderTerm{col: col, desc: desc})
+	}
+	return q
+}
+
 // Page sets the pagination arguments.
 func (q *Query) Page(p PagingParams) *Query {
 	q.paging = p

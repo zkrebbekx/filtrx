@@ -88,6 +88,45 @@ LIMIT $6 OFFSET $7
 -- args: active, 18, 65, admin, mod, 21, 0
 ```
 
+## From a REST handler
+
+`Bind`, `BindPage` and `Sort` turn a raw query string into a filter, paging and
+ordering — no manual parsing, and the column allow-list keeps sort safe:
+
+```go
+func listUsers(w http.ResponseWriter, r *http.Request) {
+	v := r.URL.Query() // ?status=active&age_gte=18&role=admin&first=20&total=true&sort=-created
+
+	var f UserFilter
+	if err := filtrx.Bind(v, &f); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	page, err := filtrx.BindPage(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var users []User
+	q := filtrx.From("users").
+		Where(f).
+		Sort(v.Get("sort"), map[string]string{ // only these keys may sort
+			"name":    "name",
+			"created": "created_at",
+		}).
+		Page(page)
+
+	info, err := filtrx.List(r.Context(), db, q, &users)
+	// ... encode {users, info} as JSON
+}
+```
+
+Query-parameter conventions: `status=active` (equality), `age_gte=18&age_lt=65`
+(range), `role=admin&role=mod` or `role=admin,mod` (IN), `active=true` (scalar
+`Opt`). Pagination: `first` / `last` / `after` / `before` / `total`. Unknown
+parameters are ignored, so everything coexists in one query string.
+
 ## Filtering
 
 ### Holders

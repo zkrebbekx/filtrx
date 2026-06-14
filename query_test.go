@@ -140,6 +140,44 @@ func TestList(t *testing.T) {
 		})
 	})
 
+	Convey("Given a whitelisted sort parsed from a request", t, func() {
+		db, mock := newMock(t)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT * FROM "users" ORDER BY "name", "created_at" DESC`).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(1, "a"))
+
+		q := From("users").Sort("name,-created", map[string]string{
+			"name":    "name",
+			"created": "created_at",
+		})
+		var got []user
+		_, err := List(context.Background(), db, q, &got)
+
+		Convey("When listed", func() {
+			Convey("Then allowed keys map to columns with the right direction", func() {
+				So(err, ShouldBeNil)
+				So(mock.ExpectationsWereMet(), ShouldBeNil)
+			})
+		})
+	})
+
+	Convey("Given a sort key that is not allowed", t, func() {
+		db, _ := newMock(t)
+		defer func() { _ = db.Close() }()
+
+		q := From("users").Sort("password", map[string]string{"name": "name"})
+		var got []user
+		_, err := List(context.Background(), db, q, &got)
+
+		Convey("When listed", func() {
+			Convey("Then it is rejected as a compile error, never reaching SQL", func() {
+				So(err, ShouldNotBeNil)
+				So(errors.Is(err, ErrCompile), ShouldBeTrue)
+			})
+		})
+	})
+
 	Convey("Given a deferred compile error", t, func() {
 		db, _ := newMock(t)
 		defer func() { _ = db.Close() }()
