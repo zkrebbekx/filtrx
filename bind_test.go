@@ -108,6 +108,18 @@ func TestBind(t *testing.T) {
 				So(err, ShouldNotBeNil)
 			})
 		})
+
+		Convey("When a value overflows a narrow integer field", func() {
+			type narrow struct {
+				Level Match[int8] `col:"level"`
+			}
+			var f narrow
+			err := Bind(url.Values{"level": {"200"}}, &f) // 200 > int8 max
+			Convey("Then it errors instead of silently wrapping", func() {
+				So(err, ShouldNotBeNil)
+				So(f.Level.Eq.IsSet(), ShouldBeFalse)
+			})
+		})
 	})
 }
 

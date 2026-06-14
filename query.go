@@ -258,20 +258,24 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 		scanned int
 		total   int
 		sink    int
+		ignore  any
 	)
 	for rows.Next() {
 		var t T
 		v := reflect.ValueOf(&t).Elem()
 		holders := make([]any, len(cols))
 		for i, tr := range traversals {
-			if i == totalIdx {
+			switch {
+			case i == totalIdx:
 				holders[i] = &sink
-				continue
+			case len(tr) == 0:
+				// Column has no destination field. Discard it, matching the
+				// behaviour of an Unsafe sqlx session — SELECT * against a table
+				// with columns the scan struct omits is common and must not fail.
+				holders[i] = &ignore
+			default:
+				holders[i] = reflectx.FieldByIndexes(v, tr).Addr().Interface()
 			}
-			if len(tr) == 0 {
-				return 0, 0, fmt.Errorf("%w: no struct field for column %q", ErrQuery, cols[i])
-			}
-			holders[i] = reflectx.FieldByIndexes(v, tr).Addr().Interface()
 		}
 		if err := rows.Scan(holders...); err != nil {
 			return 0, 0, fmt.Errorf("%w: scan: %w", ErrQuery, err)

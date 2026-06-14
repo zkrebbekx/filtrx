@@ -221,17 +221,27 @@ func hasFilterTag(f reflect.StructField) bool {
 }
 
 // snake converts an exported Go field name to snake_case for a default column.
+// It keeps acronyms intact: an underscore is inserted before an uppercase letter
+// only at a word boundary — after a lowercase letter or digit, or before the
+// final letter of an acronym that starts a new word. So ID→id, UserID→user_id,
+// HTTPStatus→http_status, OAuth2Token→o_auth2_token.
 func snake(name string) string {
 	var b strings.Builder
-	for i, r := range name {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
+	r := []rune(name)
+	for i, c := range r {
+		if c >= 'A' && c <= 'Z' {
+			prevLowerOrDigit := i > 0 && (isLower(r[i-1]) || isDigit(r[i-1]))
+			nextLower := i+1 < len(r) && isLower(r[i+1])
+			if i > 0 && (prevLowerOrDigit || nextLower) {
 				b.WriteByte('_')
 			}
-			b.WriteRune(r - 'A' + 'a')
+			b.WriteRune(c - 'A' + 'a')
 		} else {
-			b.WriteRune(r)
+			b.WriteRune(c)
 		}
 	}
 	return b.String()
 }
+
+func isLower(r rune) bool { return r >= 'a' && r <= 'z' }
+func isDigit(r rune) bool { return r >= '0' && r <= '9' }

@@ -106,6 +106,17 @@ func TestWhere(t *testing.T) {
 				So(sql, ShouldEqual, `"created_at" > $1`)
 			})
 		})
+		Convey("When a field name contains an acronym", func() {
+			type f struct {
+				ID     Match[int] `col:""`
+				UserID Match[int] `col:""`
+			}
+			c, _ := Where(f{ID: Match[int]{Eq: Some(1)}, UserID: Match[int]{Eq: Some(2)}})
+			sql, _ := Build(c, Postgres)
+			Convey("Then the acronym is kept intact, not split letter by letter", func() {
+				So(sql, ShouldEqual, `("id" = $1 AND "user_id" = $2)`)
+			})
+		})
 	})
 
 	Convey("Given invalid filter definitions", t, func() {

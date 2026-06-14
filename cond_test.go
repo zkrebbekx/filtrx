@@ -67,6 +67,33 @@ func TestBuild(t *testing.T) {
 		})
 	})
 
+	Convey("Given an empty IN list built by hand", t, func() {
+		Convey("When IN is given an empty slice", func() {
+			sql, args := Build(In("id", []int{}), Postgres)
+			Convey("Then it renders a constant-false predicate, not invalid SQL", func() {
+				So(sql, ShouldEqual, "1=0")
+				So(args, ShouldBeEmpty)
+			})
+		})
+		Convey("When NOT IN is given an empty slice", func() {
+			sql, _ := Build(NotIn("id", []string{}), Postgres)
+			Convey("Then it renders a constant-true predicate", func() {
+				So(sql, ShouldEqual, "1=1")
+			})
+		})
+	})
+
+	Convey("Given a caller's slice passed to And", t, func() {
+		Convey("When the slice contains a nil child and is reused", func() {
+			parts := []Cond{Eq("a", 1), nil, Eq("b", 2)}
+			_ = And(parts...)
+			Convey("Then And must not corrupt the caller's slice", func() {
+				So(parts[1], ShouldBeNil)
+				So(parts[2], ShouldNotBeNil)
+			})
+		})
+	})
+
 	Convey("Given the same tree across dialects", t, func() {
 		c := And(Eq("a", 1), Eq("b", 2))
 		Convey("When rendered for MySQL", func() {

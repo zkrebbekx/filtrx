@@ -87,6 +87,19 @@ type leaf struct {
 }
 
 func (c leaf) write(b *builder) {
+	// An empty IN list is invalid SQL on every dialect. Treat the empty set as
+	// "matches nothing" for IN and "matches everything" for NOT IN, so a filter
+	// that happens to carry an empty slice degrades sensibly instead of producing
+	// "col IN ()". This guards the hand-built In/NotIn constructors; the struct
+	// paths already skip empty slices.
+	if (c.op == opIn || c.op == opNotIn) && emptySlice(c.val) {
+		if c.op == opIn {
+			b.sql.WriteString("1=0")
+		} else {
+			b.sql.WriteString("1=1")
+		}
+		return
+	}
 	b.sql.WriteString(b.d.quoteIdent(c.col))
 	switch c.op {
 	case opNull, opNNull:
@@ -106,9 +119,15 @@ func (c leaf) write(b *builder) {
 	}
 }
 
+// emptySlice reports whether val is a slice with no elements.
+func emptySlice(val any) bool {
+	rv := reflect.ValueOf(val)
+	return rv.Kind() == reflect.Slice && rv.Len() == 0
+}
+
 // writeList expands a slice value into "?, ?, ?" with one bound argument per
-// element. A non-slice value is bound as a single element. An empty slice would
-// produce invalid SQL, so callers guard against it before constructing the cmp.
+// element. A non-slice value is bound as a single element. Empty slices are
+// handled earlier in leaf.write, so this never emits a zero-length list.
 func (b *builder) writeList(val any) {
 	rv := reflect.ValueOf(val)
 	if rv.Kind() != reflect.Slice {
@@ -217,9 +236,11 @@ func IsNotNull(col string) Cond { return leaf{col, opNNull, nil} }
 // fragment is emitted verbatim, so never build it from untrusted input.
 func Raw(sql string, args ...any) Cond { return raw{sql: sql, args: args} }
 
-// compact drops nil children so callers can append conditionally.
+// compact drops nil children so callers can append conditionally. It allocates a
+// fresh slice rather than reusing the input's backing array, because And/Or take
+// the caller's slice directly through the variadic and must not mutate it.
 func compact(conds []Cond) []Cond {
-	out := conds[:0]
+	out := make([]Cond, 0, len(conds))
 	for _, c := range conds {
 		if c != nil {
 			out = append(out, c)

@@ -190,19 +190,21 @@ func parseScalar(v reflect.Value, s string) error {
 		}
 		v.SetBool(b)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(s, 10, 64)
+		// Parse at the field's own width so an out-of-range value errors rather
+		// than silently wrapping (SetInt truncates without complaint).
+		n, err := strconv.ParseInt(s, 10, v.Type().Bits())
 		if err != nil {
 			return err
 		}
 		v.SetInt(n)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(s, 10, 64)
+		n, err := strconv.ParseUint(s, 10, v.Type().Bits())
 		if err != nil {
 			return err
 		}
 		v.SetUint(n)
 	case reflect.Float32, reflect.Float64:
-		fl, err := strconv.ParseFloat(s, 64)
+		fl, err := strconv.ParseFloat(s, v.Type().Bits())
 		if err != nil {
 			return err
 		}

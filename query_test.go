@@ -140,6 +140,31 @@ func TestList(t *testing.T) {
 		})
 	})
 
+	Convey("Given SELECT * returning a column the struct omits", t, func() {
+		db, mock := newMock(t)
+		defer func() { _ = db.Close() }()
+
+		// created_at has no field on user{ID,Name}; it must be ignored, not error.
+		mock.ExpectQuery(`SELECT * FROM "users" LIMIT $1 OFFSET $2`).
+			WithArgs(3, 0).
+			WillReturnRows(
+				sqlmock.NewRows([]string{"id", "name", "created_at"}).
+					AddRow(1, "ann", "2026-01-01"),
+			)
+
+		q := From("users").Page(PagingParams{First: intp(2)})
+		var got []user
+		_, err := List(context.Background(), db, q, &got)
+
+		Convey("When listed", func() {
+			Convey("Then unmapped columns are discarded like an Unsafe sqlx scan", func() {
+				So(err, ShouldBeNil)
+				So(got, ShouldResemble, []user{{ID: 1, Name: "ann"}})
+				So(mock.ExpectationsWereMet(), ShouldBeNil)
+			})
+		})
+	})
+
 	Convey("Given a standalone count", t, func() {
 		db, mock := newMock(t)
 		defer func() { _ = db.Close() }()
