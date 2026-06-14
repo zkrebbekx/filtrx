@@ -80,6 +80,39 @@ type planResult struct {
 	err error
 }
 
+// fieldRole is the kind of filter a struct field represents. It is the single
+// classification shared by the Where compiler and the query-string Bind, so a
+// field means the same thing whether it is filled in code or from a request.
+type fieldRole int
+
+const (
+	roleNone      fieldRole = iota // not a filter field
+	roleGroup                      // slice-of-struct with a group tag (And/Or)
+	rolePredicate                  // type implements Predicate (Range/Match/Text)
+	roleScalar                     // Opt[T], a single operator
+	roleSlice                      // slice, IN / NOT IN
+)
+
+// classifyField determines a field's role from its type and tags.
+func classifyField(f reflect.StructField) fieldRole {
+	if !f.IsExported() {
+		return roleNone
+	}
+	if f.Tag.Get("group") != "" {
+		return roleGroup
+	}
+	switch {
+	case f.Type.Implements(predicateT):
+		return rolePredicate
+	case f.Type.Implements(setterT):
+		return roleScalar
+	case f.Type.Kind() == reflect.Slice:
+		return roleSlice
+	default:
+		return roleNone
+	}
+}
+
 func planFor(t reflect.Type) (*plan, error) {
 	if r, ok := planCache.Load(t); ok {
 		res := r.(planResult)
@@ -94,33 +127,36 @@ func buildPlan(t reflect.Type) (*plan, error) {
 	p := &plan{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if !f.IsExported() {
+		role := classifyField(f)
+		if role == roleNone {
+			if f.IsExported() && hasFilterTag(f) {
+				return nil, fmt.Errorf("filtrx: field %s has a filtrx tag but type %s is not a supported filter field", f.Name, f.Type)
+			}
 			continue
 		}
 		col := columnName(f)
 		if col == "-" {
 			continue
 		}
-		groupTag := f.Tag.Get("group")
-		switch {
-		case groupTag != "":
+		switch role {
+		case roleGroup:
 			if f.Type.Kind() != reflect.Slice || f.Type.Elem().Kind() != reflect.Struct {
 				return nil, fmt.Errorf("filtrx: field %s has group tag but is not a slice of struct", f.Name)
 			}
-			or, err := groupOr(groupTag, f.Name)
+			or, err := groupOr(f.Tag.Get("group"), f.Name)
 			if err != nil {
 				return nil, err
 			}
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepGroup, or: or, elemT: f.Type.Elem()})
-		case f.Type.Implements(predicateT):
+		case rolePredicate:
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepPredicate, col: col})
-		case f.Type.Implements(setterT):
+		case roleScalar:
 			o, err := scalarOp(f)
 			if err != nil {
 				return nil, err
 			}
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepScalar, col: col, op: o})
-		case f.Type.Kind() == reflect.Slice:
+		case roleSlice:
 			o := opIn
 			if w := f.Tag.Get("op"); w != "" {
 				resolved, ok := opWords[w]
@@ -130,10 +166,6 @@ func buildPlan(t reflect.Type) (*plan, error) {
 				o = resolved
 			}
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepSlice, col: col, op: o})
-		default:
-			if hasFilterTag(f) {
-				return nil, fmt.Errorf("filtrx: field %s has a filtrx tag but type %s is not a supported filter field", f.Name, f.Type)
-			}
 		}
 	}
 	return p, nil

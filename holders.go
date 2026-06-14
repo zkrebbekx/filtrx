@@ -1,7 +1,5 @@
 package filtrx
 
-import "cmp"
-
 // Predicate is implemented by a filter field type that contributes one or more
 // conditions for the column it is tagged with. The built-in holders Range,
 // Match and Text implement it; you can define your own holder for a column type
@@ -15,10 +13,13 @@ type Predicate interface {
 	Predicates(col string) []Cond
 }
 
-// Range is a filter holder for an ordered column. Set any subset of its fields;
-// only the set ones become conditions, AND-joined. Its zero value contributes
-// nothing. One Range covers the common "between" shape via Gte plus Lte.
-type Range[T cmp.Ordered] struct {
+// Range is a filter holder for an ordered column — numbers, time.Time, dates,
+// decimals, anything the database can compare with the ordering operators. The
+// element type is unconstrained because filtrx never orders values in Go; it
+// only emits "col > $1" and lets the database order them. Set any subset of its
+// fields; only the set ones become conditions, AND-joined. Its zero value
+// contributes nothing, and one Range covers "between" via Gte plus Lte.
+type Range[T any] struct {
 	Eq     Opt[T]    `json:"eq,omitempty"`
 	Ne     Opt[T]    `json:"ne,omitempty"`
 	Gt     Opt[T]    `json:"gt,omitempty"`

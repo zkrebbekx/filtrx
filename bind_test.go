@@ -3,6 +3,7 @@ package filtrx
 import (
 	"net/url"
 	"testing"
+	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -106,6 +107,22 @@ func TestBind(t *testing.T) {
 			err := Bind(url.Values{}, bindFilter{})
 			Convey("Then Bind returns an error", func() {
 				So(err, ShouldNotBeNil)
+			})
+		})
+
+		Convey("When a time.Time range is bound from RFC 3339 values", func() {
+			type events struct {
+				At Range[time.Time] `col:"created_at"`
+			}
+			var f events
+			err := Bind(url.Values{"created_at_gte": {"2026-01-01T00:00:00Z"}}, &f)
+			c, _ := Where(f)
+			sql, args := Build(c, Postgres)
+			Convey("Then the timestamp parses through TextUnmarshaler into the filter", func() {
+				So(err, ShouldBeNil)
+				So(sql, ShouldEqual, `"created_at" >= $1`)
+				So(args, ShouldHaveLength, 1)
+				So(args[0], ShouldHaveSameTypeAs, time.Time{})
 			})
 		})
 

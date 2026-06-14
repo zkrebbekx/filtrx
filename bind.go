@@ -1,12 +1,12 @@
 package filtrx
 
 import (
+	"encoding"
 	"fmt"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Bind populates a filter struct from URL query parameters, so a REST handler
@@ -89,19 +89,17 @@ func truthy(s string) bool {
 }
 
 func bindField(values url.Values, wire string, f reflect.StructField, fv reflect.Value) error {
-	switch {
-	case fv.Addr().Type().Implements(stringSetterType): // scalar Opt[T]
+	switch classifyField(f) {
+	case roleScalar:
 		if raw, ok := first(values, wire); ok {
 			return setScalar(fv, raw, wire)
 		}
-		return nil
-	case fv.Kind() == reflect.Slice && f.Tag.Get("group") == "": // top-level slice → IN
+	case roleSlice:
 		return bindSlice(values, wire, fv, wire)
-	case fv.Type().Implements(predicateT): // holder
+	case rolePredicate:
 		return bindHolder(values, wire, fv)
-	default:
-		return nil
 	}
+	return nil
 }
 
 // bindHolder fills a holder's operator sub-fields from wire_<op> parameters.
@@ -175,11 +173,16 @@ type stringSetter interface {
 	setString(s string) error
 }
 
-var stringSetterType = reflect.TypeOf((*stringSetter)(nil)).Elem()
-
-// parseScalar parses s into the (settable) reflect value v according to its kind.
-// It covers the primitive kinds plus time.Time (RFC 3339).
+// parseScalar parses s into the (settable) reflect value v. A type that
+// implements encoding.TextUnmarshaler is parsed through it — so time.Time
+// (RFC 3339), uuid.UUID, netip.Addr and any custom column type bind from the
+// wire without special-casing. Otherwise the primitive kinds are parsed directly.
 func parseScalar(v reflect.Value, s string) error {
+	if v.CanAddr() {
+		if tu, ok := v.Addr().Interface().(encoding.TextUnmarshaler); ok {
+			return tu.UnmarshalText([]byte(s))
+		}
+	}
 	switch v.Kind() {
 	case reflect.String:
 		v.SetString(s)
@@ -210,15 +213,7 @@ func parseScalar(v reflect.Value, s string) error {
 		}
 		v.SetFloat(fl)
 	default:
-		if v.Type() == reflect.TypeOf(time.Time{}) {
-			ts, err := time.Parse(time.RFC3339, s)
-			if err != nil {
-				return err
-			}
-			v.Set(reflect.ValueOf(ts))
-			return nil
-		}
-		return fmt.Errorf("unsupported bind type %s", v.Type())
+		return fmt.Errorf("filtrx: unsupported bind type %s", v.Type())
 	}
 	return nil
 }

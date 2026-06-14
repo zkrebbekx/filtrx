@@ -247,46 +247,43 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 
 	var zero T
 	traversals := defaultMapper.TraversalsByName(reflect.TypeOf(zero), cols)
-	totalIdx := -1
-	for i, c := range cols {
-		if c == totalColumn {
-			totalIdx = i
+
+	// Build the scan destinations once and reuse them for every row. The holders
+	// point into a single row buffer t whose address is stable; each scanned row
+	// is copied by value into dest, so the buffer can be overwritten safely.
+	var (
+		row    T
+		sink   int // receives the window total (identical on every row)
+		ignore any // receives any column with no destination field
+	)
+	rv := reflect.ValueOf(&row).Elem()
+	holders := make([]any, len(cols))
+	for i, tr := range traversals {
+		switch {
+		case cols[i] == totalColumn:
+			holders[i] = &sink
+		case len(tr) == 0:
+			// Column has no destination field. Discard it, matching the behaviour
+			// of an Unsafe sqlx session — SELECT * against a table with columns
+			// the scan struct omits is common and must not fail.
+			holders[i] = &ignore
+		default:
+			holders[i] = reflectx.FieldByIndexes(rv, tr).Addr().Interface()
 		}
 	}
 
-	var (
-		scanned int
-		total   int
-		sink    int
-		ignore  any
-	)
+	var scanned int
 	for rows.Next() {
-		var t T
-		v := reflect.ValueOf(&t).Elem()
-		holders := make([]any, len(cols))
-		for i, tr := range traversals {
-			switch {
-			case i == totalIdx:
-				holders[i] = &sink
-			case len(tr) == 0:
-				// Column has no destination field. Discard it, matching the
-				// behaviour of an Unsafe sqlx session — SELECT * against a table
-				// with columns the scan struct omits is common and must not fail.
-				holders[i] = &ignore
-			default:
-				holders[i] = reflectx.FieldByIndexes(v, tr).Addr().Interface()
-			}
-		}
 		if err := rows.Scan(holders...); err != nil {
 			return 0, 0, fmt.Errorf("%w: scan: %w", ErrQuery, err)
 		}
-		*dest = append(*dest, t)
+		*dest = append(*dest, row)
 		scanned++
-		total = sink // identical on every row; last write wins
 	}
 	if err := rows.Err(); err != nil {
 		return 0, 0, fmt.Errorf("%w: %w", ErrQuery, err)
 	}
+	total := sink
 	return scanned, total, nil
 }
 
