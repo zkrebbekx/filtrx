@@ -34,10 +34,12 @@ func Where(filter any) (Cond, error) {
 	return c, err
 }
 
-// compileFilter resolves a filter struct to its condition and its compiled plan,
-// the plan carrying any source (FROM/joins) declared by marker fields. It backs
-// both the public Where and the Query builder's Where.
-func compileFilter(filter any) (Cond, *plan, error) {
+// compileFilter resolves a filter struct to its condition and the source
+// (FROM/joins) declared by its marker fields, if any. It backs both the public
+// Where and the Query builder's Where, exposing only the narrow source seam
+// rather than the whole plan. The returned *sourceSpec is the cached, read-only
+// spec shared across all queries of this filter type; callers must not mutate it.
+func compileFilter(filter any) (Cond, *sourceSpec, error) {
 	v := reflect.ValueOf(filter)
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
@@ -52,7 +54,7 @@ func compileFilter(filter any) (Cond, *plan, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return p.build(v), p, nil
+	return p.build(v), p.source, nil
 }
 
 type stepKind int
@@ -137,25 +139,23 @@ func buildPlan(t reflect.Type) (*plan, error) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 
-		// Source markers (From/Join) declare the table and joins, not a filter.
-		switch f.Type {
-		case tableType:
+		// Source markers (Table/Join) declare the table and joins, not a filter.
+		// Like filter fields they must be exported to be read.
+		if f.IsExported() && (f.Type == tableType || f.Type == joinType) {
 			if p.source == nil {
 				p.source = &sourceSpec{}
 			}
-			if err := parseTable(f, p.source); err != nil {
-				return nil, err
+			if f.Type == tableType {
+				if err := parseTable(f, p.source); err != nil {
+					return nil, err
+				}
+			} else {
+				j, err := parseJoin(f)
+				if err != nil {
+					return nil, err
+				}
+				p.source.joins = append(p.source.joins, j)
 			}
-			continue
-		case joinType:
-			if p.source == nil {
-				p.source = &sourceSpec{}
-			}
-			j, err := parseJoin(f)
-			if err != nil {
-				return nil, err
-			}
-			p.source.joins = append(p.source.joins, j)
 			continue
 		}
 

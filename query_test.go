@@ -140,6 +140,41 @@ func TestList(t *testing.T) {
 		})
 	})
 
+	Convey("Given a scan target with a nested pointer field", t, func() {
+		db, mock := newMock(t)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT * FROM "people" LIMIT $1 OFFSET $2`).
+			WithArgs(11, 0).
+			WillReturnRows(
+				sqlmock.NewRows([]string{"id", "home.street"}).
+					AddRow(1, "main").
+					AddRow(2, "elm"),
+			)
+
+		type addr struct {
+			Street string `db:"street"`
+		}
+		type person struct {
+			ID   int   `db:"id"`
+			Home *addr `db:"home"`
+		}
+
+		q := From("people").Page(PagingParams{First: intp(10)})
+		var got []person
+		_, err := List(context.Background(), db, q, &got)
+
+		Convey("When listed", func() {
+			Convey("Then each row gets its own pointer, not the last row's value", func() {
+				So(err, ShouldBeNil)
+				So(len(got), ShouldEqual, 2)
+				So(got[0].Home.Street, ShouldEqual, "main")
+				So(got[1].Home.Street, ShouldEqual, "elm")
+				So(got[0].Home, ShouldNotEqual, got[1].Home) // distinct allocations
+			})
+		})
+	})
+
 	Convey("Given SELECT * returning a column the struct omits", t, func() {
 		db, mock := newMock(t)
 		defer func() { _ = db.Close() }()

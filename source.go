@@ -21,8 +21,15 @@ type Table struct{}
 //	Pay filtrx.Join `table:"payments" as:"p" on:"p.order_id = o.id" type:"left"`
 //
 // type defaults to an inner join; accepted values are inner, left, right and
-// full. The on expression is emitted verbatim, so it must not be built from
-// request data.
+// full (full is not portable to MySQL). The on expression is emitted verbatim,
+// so it must not be built from request data, and table aliases should be
+// lowercase to match the unquoted references in on.
+//
+// Joins are intended for many-to-one or one-to-one relationships, where the base
+// row is not multiplied. A one-to-many join fans the result out — duplicating
+// base rows, inflating the COUNT(*) OVER() total and making LIMIT count joined
+// rows rather than entities. For one-to-many filtering use a view or a
+// correlated EXISTS via Raw instead.
 type Join struct{}
 
 var (

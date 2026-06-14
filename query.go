@@ -22,9 +22,7 @@ var defaultMapper = reflectx.NewMapper("db")
 // filter, ordering and paging. Build one with From and the chaining methods,
 // then pass it to List. The zero dialect is Postgres; set another with On.
 type Query struct {
-	table   string
-	alias   string
-	joins   []joinSpec
+	from    *sourceSpec
 	columns []string
 	cond    Cond
 	order   []orderTerm
@@ -40,7 +38,7 @@ type orderTerm struct {
 
 // From starts a query against the given table or view.
 func From(table string) *Query {
-	return &Query{table: table, dialect: Postgres}
+	return &Query{from: &sourceSpec{table: table}, dialect: Postgres}
 }
 
 // For starts a query whose table and joins are declared by a filter struct's
@@ -59,7 +57,7 @@ func From(table string) *Query {
 func For(filter any) *Query {
 	q := &Query{dialect: Postgres}
 	q.Where(filter)
-	if q.err == nil && q.table == "" {
+	if q.err == nil && (q.from == nil || q.from.table == "") {
 		q.err = fmt.Errorf("%w: For requires a filtrx.Table marker field", ErrCompile)
 	}
 	return q
@@ -77,16 +75,16 @@ func (q *Query) Select(cols ...string) *Query {
 // they also set the query's table and joins. A compile error is deferred and
 // surfaced by List.
 func (q *Query) Where(filter any) *Query {
-	c, p, err := compileFilter(filter)
+	c, src, err := compileFilter(filter)
 	if err != nil {
 		q.err = err
 		return q
 	}
 	q.cond = c
-	if p != nil && p.source != nil {
-		q.table = p.source.table
-		q.alias = p.source.alias
-		q.joins = p.source.joins
+	if src != nil {
+		// The struct's declared source (table + joins) takes over the query's
+		// FROM. src is the cached, read-only spec; never mutate it here.
+		q.from = src
 	}
 	return q
 }
@@ -245,11 +243,10 @@ func (q *Query) Count(ctx context.Context, db sqlx.QueryerContext) (int, error) 
 // fromClause renders the FROM target: the table (with optional alias) plus any
 // joins. Joins come only from a filter struct's marker fields.
 func (q *Query) fromClause() string {
-	if len(q.joins) == 0 && q.alias == "" {
-		return q.dialect.quoteIdent(q.table)
+	if q.from == nil {
+		return ""
 	}
-	s := &sourceSpec{table: q.table, alias: q.alias, joins: q.joins}
-	return s.render(q.dialect)
+	return q.from.render(q.dialect)
 }
 
 // count runs SELECT COUNT(*) for the filter, ignoring ordering and paging.
@@ -289,32 +286,34 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 	var zero T
 	traversals := defaultMapper.TraversalsByName(reflect.TypeOf(zero), cols)
 
-	// Build the scan destinations once and reuse them for every row. The holders
-	// point into a single row buffer t whose address is stable; each scanned row
-	// is copied by value into dest, so the buffer can be overwritten safely.
 	var (
-		row    T
-		sink   int // receives the window total (identical on every row)
-		ignore any // receives any column with no destination field
+		scanned int
+		sink    int // receives the window total (identical on every row)
 	)
-	rv := reflect.ValueOf(&row).Elem()
-	holders := make([]any, len(cols))
-	for i, tr := range traversals {
-		switch {
-		case cols[i] == totalColumn:
-			holders[i] = &sink
-		case len(tr) == 0:
-			// Column has no destination field. Discard it, matching the behaviour
-			// of an Unsafe sqlx session — SELECT * against a table with columns
-			// the scan struct omits is common and must not fail.
-			holders[i] = &ignore
-		default:
-			holders[i] = reflectx.FieldByIndexes(rv, tr).Addr().Interface()
-		}
-	}
-
-	var scanned int
 	for rows.Next() {
+		// Allocate a fresh row per iteration. Destinations must not be reused
+		// across rows: a field reached through a pointer (or a buffer-aliasing
+		// Scanner like sql.RawBytes) would otherwise be shared, so every appended
+		// row would end up holding the last row's value.
+		var (
+			row    T
+			ignore any
+		)
+		rv := reflect.ValueOf(&row).Elem()
+		holders := make([]any, len(cols))
+		for i, tr := range traversals {
+			switch {
+			case cols[i] == totalColumn:
+				holders[i] = &sink
+			case len(tr) == 0:
+				// Column has no destination field. Discard it, matching an Unsafe
+				// sqlx session — SELECT * against a table with columns the scan
+				// struct omits is common and must not fail.
+				holders[i] = &ignore
+			default:
+				holders[i] = reflectx.FieldByIndexes(rv, tr).Addr().Interface()
+			}
+		}
 		if err := rows.Scan(holders...); err != nil {
 			return 0, 0, fmt.Errorf("%w: scan: %w", ErrQuery, err)
 		}
@@ -324,8 +323,7 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 	if err := rows.Err(); err != nil {
 		return 0, 0, fmt.Errorf("%w: %w", ErrQuery, err)
 	}
-	total := sink
-	return scanned, total, nil
+	return scanned, sink, nil
 }
 
 func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, window bool) (string, []any) {
@@ -339,10 +337,11 @@ func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, wi
 			}
 			sb.WriteString(c)
 		}
-	case q.alias != "":
-		// With joins, a bare * pulls every joined table's columns (and collides
-		// on shared names like id). Default to the base table's columns only.
-		sb.WriteString(q.dialect.quoteIdent(q.alias))
+	case q.from != nil && q.from.alias != "":
+		// With an aliased source (joins), a bare * pulls every joined table's
+		// columns (and collides on shared names like id). Default to the base
+		// table's columns only.
+		sb.WriteString(q.dialect.quoteIdent(q.from.alias))
 		sb.WriteString(".*")
 	default:
 		sb.WriteString("*")

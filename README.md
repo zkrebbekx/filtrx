@@ -226,6 +226,19 @@ ORDER BY "u"."id" LIMIT $3 OFFSET $4
   avoid pulling — and colliding on — every joined table's columns.
 - `on` expressions are emitted verbatim, so never build them from request data.
 
+> **Join cardinality matters.** filtrx joins are for filtering the base table by
+> a related one where the base row is **not multiplied** — many-to-one or
+> one-to-one (a user's organization, a product's category). A **one-to-many**
+> join (a user's *many* orders) fans the result out: the base row repeats once
+> per match, which duplicates rows in the page, inflates the `COUNT(*) OVER()`
+> total, and makes `LIMIT`/offset count joined rows instead of entities. For
+> one-to-many filtering, filter against a pre-joined view, or use a correlated
+> `EXISTS` via `filtrx.Raw` in the `Where` tree, rather than a `Join`.
+>
+> Portability: `full` joins aren't supported by MySQL and only by recent SQLite.
+> Keep table aliases lowercase — the `on` expression is emitted verbatim, so a
+> quoted mixed-case alias (`as:"U"`) won't match an unquoted `U` in `on`.
+
 ## Pagination
 
 `PagingParams` mirrors the Relay connection arguments over record offsets:

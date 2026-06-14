@@ -63,6 +63,12 @@ func quoteName(s string, q byte) string {
 	}
 	parts := strings.Split(s, ".")
 	for i, p := range parts {
+		// Leave a wildcard or empty segment alone: "u.*" must stay "u".* (a
+		// quoted "*" would be a literal column named *), and an empty segment
+		// has nothing to quote.
+		if p == "" || p == "*" {
+			continue
+		}
 		parts[i] = quote(p, q)
 	}
 	return strings.Join(parts, ".")
