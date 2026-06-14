@@ -1,6 +1,7 @@
 # filtrx
 
 [![CI](https://github.com/zkrebbekx/filtrx/actions/workflows/ci.yml/badge.svg)](https://github.com/zkrebbekx/filtrx/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/zkrebbekx/filtrx/branch/main/graph/badge.svg)](https://codecov.io/gh/zkrebbekx/filtrx)
 [![Go Reference](https://pkg.go.dev/badge/github.com/zkrebbekx/filtrx.svg)](https://pkg.go.dev/github.com/zkrebbekx/filtrx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/zkrebbekx/filtrx)](https://goreportcard.com/report/github.com/zkrebbekx/filtrx)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
