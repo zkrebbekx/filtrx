@@ -30,21 +30,29 @@ import (
 // All set fields of the struct are AND-joined. A struct with nothing set
 // compiles to a nil Cond, which Build renders as an empty WHERE.
 func Where(filter any) (Cond, error) {
+	c, _, err := compileFilter(filter)
+	return c, err
+}
+
+// compileFilter resolves a filter struct to its condition and its compiled plan,
+// the plan carrying any source (FROM/joins) declared by marker fields. It backs
+// both the public Where and the Query builder's Where.
+func compileFilter(filter any) (Cond, *plan, error) {
 	v := reflect.ValueOf(filter)
 	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
-			return nil, nil
+			return nil, nil, nil
 		}
 		v = v.Elem()
 	}
 	if v.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("filtrx: Where requires a struct, got %s", v.Kind())
+		return nil, nil, fmt.Errorf("filtrx: Where requires a struct, got %s", v.Kind())
 	}
 	p, err := planFor(v.Type())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return p.build(v), nil
+	return p.build(v), p, nil
 }
 
 type stepKind int
@@ -66,7 +74,8 @@ type fieldStep struct {
 }
 
 type plan struct {
-	steps []fieldStep
+	steps  []fieldStep
+	source *sourceSpec // FROM/joins from marker fields; nil for single-table
 }
 
 var (
@@ -127,6 +136,29 @@ func buildPlan(t reflect.Type) (*plan, error) {
 	p := &plan{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+
+		// Source markers (From/Join) declare the table and joins, not a filter.
+		switch f.Type {
+		case tableType:
+			if p.source == nil {
+				p.source = &sourceSpec{}
+			}
+			if err := parseTable(f, p.source); err != nil {
+				return nil, err
+			}
+			continue
+		case joinType:
+			if p.source == nil {
+				p.source = &sourceSpec{}
+			}
+			j, err := parseJoin(f)
+			if err != nil {
+				return nil, err
+			}
+			p.source.joins = append(p.source.joins, j)
+			continue
+		}
+
 		role := classifyField(f)
 		if role == roleNone {
 			if f.IsExported() && hasFilterTag(f) {
@@ -167,6 +199,9 @@ func buildPlan(t reflect.Type) (*plan, error) {
 			}
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepSlice, col: col, op: o})
 		}
+	}
+	if p.source != nil && p.source.table == "" {
+		return nil, fmt.Errorf("filtrx: filter declares Join fields but no Table field")
 	}
 	return p, nil
 }

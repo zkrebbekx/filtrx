@@ -62,6 +62,25 @@ func setupSchema(ctx context.Context, t *testing.T, db *sqlx.DB) {
 			`INSERT INTO products (id, name, category, price, in_stock) VALUES (?, ?, ?, ?, ?)`),
 			p.ID, p.Name, p.Category, p.Price, p.InStock)
 	}
+
+	// A second table to exercise joins: categories carry a tier.
+	db.MustExecContext(ctx, `DROP TABLE IF EXISTS categories`)
+	db.MustExecContext(ctx, `CREATE TABLE categories (
+		name VARCHAR(255) PRIMARY KEY,
+		tier VARCHAR(255) NOT NULL
+	)`)
+	for name, tier := range map[string]string{"tools": "pro", "food": "basic"} {
+		db.MustExecContext(ctx, db.Rebind(
+			`INSERT INTO categories (name, tier) VALUES (?, ?)`), name, tier)
+	}
+}
+
+// productByTier joins products to categories and filters on the category tier,
+// declaring the source entirely through marker fields.
+type productByTier struct {
+	Base filtrx.Table `table:"products" as:"p"`
+	Cat  filtrx.Join  `table:"categories" as:"c" on:"c.name = p.category"`
+	Tier filtrx.Text  `col:"c.tier"`
 }
 
 func ids(ps []product) []int {
@@ -174,6 +193,21 @@ func runSuite(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
 			Convey("Then only records past the offset are returned", func() {
 				So(err, ShouldBeNil)
 				So(ids(got), ShouldResemble, []int{6})
+			})
+		})
+
+		Convey("When filtering through a joined table", func() {
+			var got []product
+			info, err := filtrx.List(ctx, db,
+				filtrx.For(productByTier{Tier: filtrx.Text{Eq: filtrx.Some("pro")}}).
+					On(d).
+					OrderBy("p.id").
+					Page(filtrx.PagingParams{First: ptr(10), IncludeTotal: true}),
+				&got)
+			Convey("Then only products in a pro-tier category come back", func() {
+				So(err, ShouldBeNil)
+				So(ids(got), ShouldResemble, []int{1, 2, 3})
+				So(info.Total, ShouldEqual, 3)
 			})
 		})
 

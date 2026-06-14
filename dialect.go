@@ -1,6 +1,9 @@
 package filtrx
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // Dialect captures the SQL differences filtrx needs to emit portable queries:
 // how bind placeholders are written and how identifiers are quoted. The three
@@ -33,23 +36,37 @@ var SQLite Dialect = sqlite{}
 type postgres struct{}
 
 func (postgres) placeholder(n int) string   { return "$" + strconv.Itoa(n) }
-func (postgres) quoteIdent(s string) string { return quote(s, '"') }
+func (postgres) quoteIdent(s string) string { return quoteName(s, '"') }
 func (postgres) supportsWindowCount() bool  { return true }
 func (postgres) allRowsLimit() string       { return "" }
 
 type mysql struct{}
 
 func (mysql) placeholder(int) string     { return "?" }
-func (mysql) quoteIdent(s string) string { return quote(s, '`') }
+func (mysql) quoteIdent(s string) string { return quoteName(s, '`') }
 func (mysql) supportsWindowCount() bool  { return true }
 func (mysql) allRowsLimit() string       { return "18446744073709551615" }
 
 type sqlite struct{}
 
 func (sqlite) placeholder(int) string     { return "?" }
-func (sqlite) quoteIdent(s string) string { return quote(s, '"') }
+func (sqlite) quoteIdent(s string) string { return quoteName(s, '"') }
 func (sqlite) allRowsLimit() string       { return "-1" }
 func (sqlite) supportsWindowCount() bool  { return true }
+
+// quoteName quotes a possibly-qualified identifier. A dotted name like
+// "u.status" is quoted segment by segment ("u"."status") so a table or alias
+// qualifier survives joins; an unqualified name is quoted whole.
+func quoteName(s string, q byte) string {
+	if !strings.Contains(s, ".") {
+		return quote(s, q)
+	}
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		parts[i] = quote(p, q)
+	}
+	return strings.Join(parts, ".")
+}
 
 // quote wraps s in the given quote rune, doubling any embedded quote so an
 // identifier can never break out of its quoting. filtrx only ever quotes

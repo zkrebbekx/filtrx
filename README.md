@@ -190,6 +190,42 @@ cond := filtrx.And(
 sql, args := filtrx.Build(cond, filtrx.Postgres)
 ```
 
+## Joins
+
+Joins are declared in the filter struct too, with `filtrx.Table` and
+`filtrx.Join` marker fields. Filter columns then reference the aliases. Start the
+query with `For`, which reads the table and joins from the struct:
+
+```go
+type OrderFilter struct {
+	Base   filtrx.Table `table:"users"  as:"u"`
+	Orders filtrx.Join  `table:"orders" as:"o" on:"o.user_id = u.id" type:"left"`
+
+	Status filtrx.Text       `col:"u.status"`
+	Total  filtrx.Range[int] `col:"o.total"`
+}
+
+q := filtrx.For(OrderFilter{
+	Status: filtrx.Text{Eq: filtrx.Some("active")},
+	Total:  filtrx.Range[int]{Gt: filtrx.Some(100)},
+}).OrderBy("u.id").Page(page)
+
+info, err := filtrx.List(ctx, db, q, &users)
+```
+→
+```sql
+SELECT "u".* FROM "users" "u"
+LEFT JOIN "orders" "o" ON o.user_id = u.id
+WHERE ("u"."status" = $1 AND "o"."total" > $2)
+ORDER BY "u"."id" LIMIT $3 OFFSET $4
+```
+
+- `type` is `inner` (default), `left`, `right` or `full`.
+- Qualified columns (`u.status`) are quoted per segment (`"u"."status"`).
+- With a join, the projection defaults to the base table's columns (`"u".*`) to
+  avoid pulling — and colliding on — every joined table's columns.
+- `on` expressions are emitted verbatim, so never build them from request data.
+
 ## Pagination
 
 `PagingParams` mirrors the Relay connection arguments over record offsets:

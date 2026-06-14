@@ -23,6 +23,8 @@ var defaultMapper = reflectx.NewMapper("db")
 // then pass it to List. The zero dialect is Postgres; set another with On.
 type Query struct {
 	table   string
+	alias   string
+	joins   []joinSpec
 	columns []string
 	cond    Cond
 	order   []orderTerm
@@ -41,6 +43,28 @@ func From(table string) *Query {
 	return &Query{table: table, dialect: Postgres}
 }
 
+// For starts a query whose table and joins are declared by a filter struct's
+// Table and Join marker fields, and applies that struct as the WHERE filter. It
+// is the entry point for join-backed filters:
+//
+//	type OrderFilter struct {
+//		Base   filtrx.Table `table:"users" as:"u"`
+//		Orders filtrx.Join  `table:"orders" as:"o" on:"o.user_id = u.id" type:"left"`
+//		Status filtrx.Text  `col:"u.status"`
+//	}
+//	q := filtrx.For(OrderFilter{Status: filtrx.Text{Eq: filtrx.Some("active")}})
+//
+// The filter must declare a Table field; otherwise the deferred error surfaces
+// at List or Count.
+func For(filter any) *Query {
+	q := &Query{dialect: Postgres}
+	q.Where(filter)
+	if q.err == nil && q.table == "" {
+		q.err = fmt.Errorf("%w: For requires a filtrx.Table marker field", ErrCompile)
+	}
+	return q
+}
+
 // Select sets the columns to return. With none given the query selects all
 // columns ("*"), which is the default.
 func (q *Query) Select(cols ...string) *Query {
@@ -49,14 +73,21 @@ func (q *Query) Select(cols ...string) *Query {
 }
 
 // Where compiles a tagged filter struct (see the package-level Where) and uses
-// it as the query's condition. A compile error is deferred and surfaced by List.
+// it as the query's condition. If the struct declares From/Join marker fields,
+// they also set the query's table and joins. A compile error is deferred and
+// surfaced by List.
 func (q *Query) Where(filter any) *Query {
-	c, err := Where(filter)
+	c, p, err := compileFilter(filter)
 	if err != nil {
 		q.err = err
 		return q
 	}
 	q.cond = c
+	if p != nil && p.source != nil {
+		q.table = p.source.table
+		q.alias = p.source.alias
+		q.joins = p.source.joins
+	}
 	return q
 }
 
@@ -211,11 +242,21 @@ func (q *Query) Count(ctx context.Context, db sqlx.QueryerContext) (int, error) 
 	return count(ctx, db, q, where, args)
 }
 
+// fromClause renders the FROM target: the table (with optional alias) plus any
+// joins. Joins come only from a filter struct's marker fields.
+func (q *Query) fromClause() string {
+	if len(q.joins) == 0 && q.alias == "" {
+		return q.dialect.quoteIdent(q.table)
+	}
+	s := &sourceSpec{table: q.table, alias: q.alias, joins: q.joins}
+	return s.render(q.dialect)
+}
+
 // count runs SELECT COUNT(*) for the filter, ignoring ordering and paging.
 func count(ctx context.Context, db sqlx.QueryerContext, q *Query, where string, args []any) (int, error) {
 	var sb strings.Builder
 	sb.WriteString("SELECT COUNT(*) FROM ")
-	sb.WriteString(q.dialect.quoteIdent(q.table))
+	sb.WriteString(q.fromClause())
 	if where != "" {
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
@@ -290,22 +331,28 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, window bool) (string, []any) {
 	var sb strings.Builder
 	sb.WriteString("SELECT ")
-	if len(q.columns) == 0 {
-		sb.WriteString("*")
-	} else {
+	switch {
+	case len(q.columns) > 0:
 		for i, c := range q.columns {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
 			sb.WriteString(c)
 		}
+	case q.alias != "":
+		// With joins, a bare * pulls every joined table's columns (and collides
+		// on shared names like id). Default to the base table's columns only.
+		sb.WriteString(q.dialect.quoteIdent(q.alias))
+		sb.WriteString(".*")
+	default:
+		sb.WriteString("*")
 	}
 	if window {
 		sb.WriteString(", COUNT(*) OVER() AS ")
 		sb.WriteString(totalColumn)
 	}
 	sb.WriteString(" FROM ")
-	sb.WriteString(q.dialect.quoteIdent(q.table))
+	sb.WriteString(q.fromClause())
 	if where != "" {
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)

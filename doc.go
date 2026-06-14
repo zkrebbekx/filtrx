@@ -26,6 +26,12 @@
 //	cond, _ := filtrx.Where(f)
 //	sql, args := filtrx.Build(cond, filtrx.Postgres)
 //
+// # Joins
+//
+// A filter struct may declare its FROM table and joins with Table and Join
+// marker fields; filter columns then reference the aliases (col:"u.status").
+// Start such a query with For, which reads the source from the struct.
+//
 // # Pagination
 //
 // Paginate resolves First/Last/Before/After into a limit and offset and reports
