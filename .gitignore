@@ -1,0 +1,6 @@
+/bin/
+coverage.out
+coverage.txt
+coverage.html
+*.test
+.DS_Store

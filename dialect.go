@@ -1,0 +1,69 @@
+package filtrx
+
+import "strconv"
+
+// Dialect captures the SQL differences filtrx needs to emit portable queries:
+// how bind placeholders are written and how identifiers are quoted. The three
+// built-in dialects cover the databases sqlx is most used with.
+type Dialect interface {
+	// placeholder returns the bind marker for the 1-based argument position n.
+	// Postgres returns "$n"; MySQL and SQLite return "?".
+	placeholder(n int) string
+	// quoteIdent quotes a column or table identifier for the dialect.
+	quoteIdent(s string) string
+	// supportsWindowCount reports whether COUNT(*) OVER() can be used to obtain
+	// the total in the same query (the "fast total" path).
+	supportsWindowCount() bool
+	// allRowsLimit returns the LIMIT value meaning "no upper bound", used when an
+	// OFFSET is required without a row limit. Postgres returns "" (OFFSET stands
+	// alone); SQLite returns "-1"; MySQL returns its maximum row count.
+	allRowsLimit() string
+}
+
+// Postgres targets PostgreSQL: numbered $1 placeholders and double-quoted
+// identifiers.
+var Postgres Dialect = postgres{}
+
+// MySQL targets MySQL and MariaDB: ? placeholders and backtick identifiers.
+var MySQL Dialect = mysql{}
+
+// SQLite targets SQLite: ? placeholders and double-quoted identifiers.
+var SQLite Dialect = sqlite{}
+
+type postgres struct{}
+
+func (postgres) placeholder(n int) string   { return "$" + strconv.Itoa(n) }
+func (postgres) quoteIdent(s string) string { return quote(s, '"') }
+func (postgres) supportsWindowCount() bool  { return true }
+func (postgres) allRowsLimit() string       { return "" }
+
+type mysql struct{}
+
+func (mysql) placeholder(int) string     { return "?" }
+func (mysql) quoteIdent(s string) string { return quote(s, '`') }
+func (mysql) supportsWindowCount() bool  { return true }
+func (mysql) allRowsLimit() string       { return "18446744073709551615" }
+
+type sqlite struct{}
+
+func (sqlite) placeholder(int) string     { return "?" }
+func (sqlite) quoteIdent(s string) string { return quote(s, '"') }
+func (sqlite) allRowsLimit() string       { return "-1" }
+func (sqlite) supportsWindowCount() bool  { return true }
+
+// quote wraps s in the given quote rune, doubling any embedded quote so an
+// identifier can never break out of its quoting. filtrx only ever quotes
+// identifiers drawn from struct tags, but defending here keeps that guarantee
+// local rather than relying on every call site.
+func quote(s string, q byte) string {
+	out := make([]byte, 0, len(s)+2)
+	out = append(out, q)
+	for i := 0; i < len(s); i++ {
+		if s[i] == q {
+			out = append(out, q)
+		}
+		out = append(out, s[i])
+	}
+	out = append(out, q)
+	return string(out)
+}
