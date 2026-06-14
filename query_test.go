@@ -140,6 +140,28 @@ func TestList(t *testing.T) {
 		})
 	})
 
+	Convey("Given a standalone count", t, func() {
+		db, mock := newMock(t)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT COUNT(*) FROM "users" WHERE "status" = $1`).
+			WithArgs("active").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
+
+		q := From("users").Where(struct {
+			Status Text `col:"status"`
+		}{Status: Text{Eq: Some("active")}})
+
+		Convey("When counted", func() {
+			n, err := q.Count(context.Background(), db)
+			Convey("Then it returns the filtered total without fetching rows", func() {
+				So(err, ShouldBeNil)
+				So(n, ShouldEqual, 7)
+				So(mock.ExpectationsWereMet(), ShouldBeNil)
+			})
+		})
+	})
+
 	Convey("Given a whitelisted sort parsed from a request", t, func() {
 		db, mock := newMock(t)
 		defer func() { _ = db.Close() }()

@@ -200,6 +200,17 @@ func List[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, dest *[]
 	return info, nil
 }
 
+// Count returns the number of rows matching the query's filter, ignoring its
+// ordering and pagination. It is the standalone COUNT for callers that want a
+// total without fetching any rows.
+func (q *Query) Count(ctx context.Context, db sqlx.QueryerContext) (int, error) {
+	if q.err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrCompile, q.err)
+	}
+	where, args := Build(q.cond, q.dialect)
+	return count(ctx, db, q, where, args)
+}
+
 // count runs SELECT COUNT(*) for the filter, ignoring ordering and paging.
 func count(ctx context.Context, db sqlx.QueryerContext, q *Query, where string, args []any) (int, error) {
 	var sb strings.Builder

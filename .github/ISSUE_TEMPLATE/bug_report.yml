@@ -1,0 +1,38 @@
+name: Bug report
+description: Report incorrect SQL, a scan error, or unexpected pagination
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did filtrx do, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: filter
+    attributes:
+      label: Filter struct and call
+      description: The filter struct definition and the Where/Build/List call.
+      render: go
+    validations:
+      required: true
+  - type: textarea
+    id: sql
+    attributes:
+      label: Generated vs expected SQL
+      description: The SQL filtrx produced and what you expected.
+      render: sql
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Dialect
+      options: [Postgres, MySQL, SQLite]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: filtrx version
+    validations:
+      required: true
