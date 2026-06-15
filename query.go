@@ -22,16 +22,17 @@ var defaultMapper = reflectx.NewMapper("db")
 // filter, ordering and paging. Build one with From and the chaining methods,
 // then pass it to List. The zero dialect is Postgres; set another with On.
 type Query struct {
-	from    *sourceSpec
-	columns []string
-	cond    Cond
-	groupBy []string
-	having  Cond
-	order   []orderTerm
-	paging  PagingParams
-	seek    *seekState
-	dialect Dialect
-	err     error
+	from       *sourceSpec
+	columns    []string
+	cond       Cond
+	groupBy    []string
+	having     Cond
+	order      []orderTerm
+	paging     PagingParams
+	seek       *seekState
+	dialect    Dialect
+	unfiltered bool
+	err        error
 }
 
 type orderTerm struct {

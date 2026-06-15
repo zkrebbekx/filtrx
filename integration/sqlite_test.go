@@ -21,4 +21,5 @@ func TestSQLite(t *testing.T) {
 	db.SetMaxOpenConns(1)
 
 	runSuite(t, db, filtrx.SQLite)
+	runMutations(t, db, filtrx.SQLite)
 }

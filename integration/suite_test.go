@@ -365,6 +365,45 @@ func runSuite(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
 	})
 }
 
+// runMutations exercises Update and Delete against a real engine. It reseeds the
+// schema first and runs as a single leaf so its writes do not leak into the
+// read-only suite (whose leaves share one database).
+func runMutations(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
+	ctx := context.Background()
+	setupSchema(ctx, t, db)
+
+	Convey("Given the seeded products, when updating then deleting by filter", t, func() {
+		updated, err := From(d, "products").
+			Where(productFilter{Category: filtrx.Text{Eq: filtrx.Some("food")}}).
+			Update(ctx, db, map[string]any{"price": 999})
+		So(err, ShouldBeNil)
+		So(updated, ShouldEqual, 3) // apple, bread, milk
+
+		deleted, err := From(d, "products").
+			Where(productFilter{InStock: filtrx.Some(0)}).
+			Delete(ctx, db)
+		So(err, ShouldBeNil)
+		So(deleted, ShouldEqual, 2) // drill and milk were out of stock
+
+		Convey("Then the surviving rows reflect both mutations", func() {
+			var got []product
+			_, err := filtrx.List(ctx, db, From(d, "products").OrderBy("id"), &got)
+			So(err, ShouldBeNil)
+			So(ids(got), ShouldResemble, []int{1, 2, 4, 5})
+			for _, p := range got {
+				if p.Category == "food" {
+					So(p.Price, ShouldEqual, 999)
+				}
+			}
+		})
+	})
+
+	Convey("Given a delete with no filter, it is refused", t, func() {
+		_, err := From(d, "categories").Delete(ctx, db)
+		So(err, ShouldNotBeNil)
+	})
+}
+
 func ptr(n int) *int { return &n }
 
 // From builds a query already pinned to the engine's dialect.

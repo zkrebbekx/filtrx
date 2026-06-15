@@ -107,6 +107,22 @@ func ExampleExists() {
 	// ("c"."status" = $1 AND EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND "o"."status" = $2))
 }
 
+// Full-text search compiles to the dialect's native match.
+func ExampleFullText() {
+	type articleFilter struct {
+		Body filtrx.FullText `col:"search_vec"`
+	}
+	f := articleFilter{Body: filtrx.FullText{Query: filtrx.Some("fast car")}}
+
+	cond, _ := filtrx.Where(f)
+	sql, args := filtrx.Build(cond, filtrx.Postgres)
+	fmt.Println(sql)
+	fmt.Println(args...)
+	// Output:
+	// "search_vec" @@ websearch_to_tsquery('english', $1)
+	// fast car
+}
+
 // Resolve pagination into a limit and offset.
 func ExamplePaginate() {
 	first := 10
