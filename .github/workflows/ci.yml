@@ -67,6 +67,19 @@ jobs:
           working-directory: integration
           args: --build-tags=integration
 
+  examples:
+    name: examples (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: Build examples module
+        working-directory: examples
+        run: go build ./... && go vet ./...
+
   integration:
     name: integration (SQLite, Postgres, MySQL)
     runs-on: ubuntu-latest
