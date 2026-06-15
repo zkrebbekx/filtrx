@@ -36,4 +36,5 @@ func TestMySQL(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	runSuite(t, db, filtrx.MySQL)
+	runMutations(t, db, filtrx.MySQL)
 }

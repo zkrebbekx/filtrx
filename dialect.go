@@ -25,6 +25,11 @@ type Dialect interface {
 	// "NULLS FIRST"/"NULLS LAST" suffix on an ORDER BY term. Postgres and modern
 	// SQLite do; MySQL does not and must emulate it with a leading ISNULL() key.
 	supportsNullsOrdering() bool
+	// fullTextMatch renders a full-text match of the already-quoted column against
+	// the search string bound at placeholder. config is the Postgres text-search
+	// configuration (ignored elsewhere). The search string is always a bind
+	// parameter; only the column and config reach the SQL text.
+	fullTextMatch(quotedCol, config, placeholder string) string
 }
 
 // Postgres targets PostgreSQL: numbered $1 placeholders and double-quoted
@@ -44,6 +49,11 @@ func (postgres) quoteIdent(s string) string  { return quoteName(s, '"') }
 func (postgres) supportsWindowCount() bool   { return true }
 func (postgres) allRowsLimit() string        { return "" }
 func (postgres) supportsNullsOrdering() bool { return true }
+func (postgres) fullTextMatch(col, config, ph string) string {
+	// websearch_to_tsquery accepts free-form user input without ever erroring on
+	// syntax, so the search string is safe to pass straight through.
+	return col + " @@ websearch_to_tsquery('" + config + "', " + ph + ")"
+}
 
 type mysql struct{}
 
@@ -52,6 +62,9 @@ func (mysql) quoteIdent(s string) string  { return quoteName(s, '`') }
 func (mysql) supportsWindowCount() bool   { return true }
 func (mysql) allRowsLimit() string        { return "18446744073709551615" }
 func (mysql) supportsNullsOrdering() bool { return false }
+func (mysql) fullTextMatch(col, _, ph string) string {
+	return "MATCH(" + col + ") AGAINST(" + ph + " IN NATURAL LANGUAGE MODE)"
+}
 
 type sqlite struct{}
 
@@ -60,6 +73,10 @@ func (sqlite) quoteIdent(s string) string  { return quoteName(s, '"') }
 func (sqlite) allRowsLimit() string        { return "-1" }
 func (sqlite) supportsWindowCount() bool   { return true }
 func (sqlite) supportsNullsOrdering() bool { return true }
+func (sqlite) fullTextMatch(col, _, ph string) string {
+	// SQLite FTS5: the column (an FTS5 table/column) matches the query directly.
+	return col + " MATCH " + ph
+}
 
 // orderClause renders one ORDER BY term: the quoted column, direction, and any
 // explicit NULL placement. Dialects with native NULLS FIRST/LAST get the suffix;

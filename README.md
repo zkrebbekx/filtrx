@@ -141,6 +141,7 @@ A filter field's type declares which operators that column allows.
 | `Range[T]`      | `eq ne gt gte lt lte in null`              | ordered columns (int, time…) |
 | `Match[T]`      | `eq ne in null`                            | enums, UUIDs, bools          |
 | `Text`          | `eq ne like ilike in null`                 | strings                      |
+| `FullText`      | native full-text match                     | search columns               |
 | `Opt[T]` + `op` | one operator, from the `op` tag            | a single fixed predicate     |
 | `[]T`           | `in` (or `nin`)                            | membership                   |
 
@@ -153,6 +154,29 @@ type ProductFilter struct {
 	Tags     []string             `col:"tag" op:"in"`
 }
 ```
+
+### Full-text search
+
+`FullText` compiles to the database's native full-text match instead of a `LIKE`
+scan, so you get stemming, ranking and query parsing. The search string binds as
+a parameter — safe straight from a search box — and reads the bare/`eq` wire
+value, so `?body=fast+car` fills it:
+
+```go
+type ArticleFilter struct {
+	Body filtrx.FullText `col:"search_vec"`
+}
+filtrx.Where(ArticleFilter{Body: filtrx.FullText{Query: filtrx.Some("fast car")}})
+```
+
+| Dialect  | Emitted SQL                                              |
+| -------- | ------------------------------------------------------- |
+| Postgres | `"search_vec" @@ websearch_to_tsquery('english', $1)`   |
+| MySQL    | `` MATCH(`search_vec`) AGAINST(? IN NATURAL LANGUAGE MODE) `` |
+| SQLite   | `"search_vec" MATCH ?` (FTS5)                            |
+
+The Postgres text-search configuration defaults to `english`; set another with
+`FullText{Config: "french"}`. It is developer-set, never request input.
 
 ### Nesting
 
@@ -418,6 +442,30 @@ info, err := filtrx.List(ctx, db, q, &rows) // info.Total = number of groups
 A `Having` over a plain grouped column can use the ordinary constructors
 (`filtrx.Gt("price", 100)`); for an aggregate expression, which must not be
 quoted as an identifier, use `filtrx.Raw`.
+
+## Updates & deletes
+
+The same filter that drives a `List` can drive an `UPDATE` or `DELETE`, so a
+"bulk action on the current selection" reuses one filter definition:
+
+```go
+n, err := filtrx.From("sessions").
+	Where(SessionFilter{Expired: filtrx.Some(true)}).
+	Delete(ctx, db) // n rows deleted
+
+n, err = filtrx.From("users").
+	Cond(filtrx.Eq("id", id)).
+	Update(ctx, db, map[string]any{"status": "active", "verified_at": now})
+```
+
+- `Update` quotes the set columns as identifiers and binds their values; the
+  `WHERE` parameters follow the assignments. Assignments emit in sorted column
+  order, so the statement is deterministic.
+- **Both refuse to run without a filter** — a filter struct that happens to be
+  all-unset can't silently wipe a table. To act on every row deliberately, call
+  `.Unfiltered()`.
+- They take a `sqlx.ExecerContext` (`*sqlx.DB`, `*sqlx.Tx`, `*sqlx.Conn`) and
+  return the affected-row count.
 
 ## Dialects
 

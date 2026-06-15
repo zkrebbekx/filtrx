@@ -42,4 +42,5 @@ func TestPostgres(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	runSuite(t, db, filtrx.Postgres)
+	runMutations(t, db, filtrx.Postgres)
 }

@@ -44,10 +44,20 @@
 // OrderByNulls. ListConnection assembles a keyset page into a GraphQL Relay
 // Connection, and BindSeek reads its arguments from a query string.
 //
+// The FullText holder compiles to the dialect's native full-text match
+// (Postgres websearch_to_tsquery, MySQL MATCH/AGAINST, SQLite FTS5) instead of a
+// LIKE scan.
+//
 // # Grouping
 //
 // Query.GroupBy and Query.Having add aggregate queries; the fast total then
 // counts groups, and Count wraps the grouped result, so pagination stays exact.
+//
+// # Updates and deletes
+//
+// The same filter can drive a write: Query.Delete and Query.Update reuse the
+// compiled WHERE. Both refuse an empty filter unless Query.Unfiltered authorises
+// a whole-table mutation.
 //
 // # One-call listing
 //
