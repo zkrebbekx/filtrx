@@ -25,6 +25,8 @@ type Query struct {
 	from    *sourceSpec
 	columns []string
 	cond    Cond
+	groupBy []string
+	having  Cond
 	order   []orderTerm
 	paging  PagingParams
 	seek    *seekState
@@ -33,8 +35,31 @@ type Query struct {
 }
 
 type orderTerm struct {
-	col  string
-	desc bool
+	col   string
+	desc  bool
+	nulls nullsPos
+}
+
+// nullsPos is where NULLs sort within an order term. The default leaves the
+// dialect's own placement, which is only safe for NOT NULL columns; keyset
+// paging over a nullable column needs an explicit position.
+type nullsPos int
+
+const (
+	nullsDefault nullsPos = iota
+	nullsFirst
+	nullsLast
+)
+
+func flipNulls(p nullsPos) nullsPos {
+	switch p {
+	case nullsFirst:
+		return nullsLast
+	case nullsLast:
+		return nullsFirst
+	default:
+		return nullsDefault
+	}
 }
 
 // From starts a query against the given table or view.
@@ -110,6 +135,20 @@ func (q *Query) OrderByDesc(col string) *Query {
 	return q
 }
 
+// OrderByNulls appends a sort on col with an explicit NULL placement. Use it
+// when col is nullable and the query pages by keyset (Seek): keyset's seek
+// predicate must know whether NULLs sort first or last, which the database's
+// default placement (and its variation across dialects) does not pin down.
+// first true places NULLs before non-NULLs, false places them after.
+func (q *Query) OrderByNulls(col string, desc, first bool) *Query {
+	pos := nullsLast
+	if first {
+		pos = nullsFirst
+	}
+	q.order = append(q.order, orderTerm{col: col, desc: desc, nulls: pos})
+	return q
+}
+
 // Sort appends ordering parsed from a request, safely. spec is a comma-separated
 // list of sort keys such as "name,-created"; a leading "-" means descending. Only
 // keys present in allowed are accepted, and the mapped value is the real column —
@@ -143,6 +182,25 @@ func (q *Query) Sort(spec string, allowed map[string]string) *Query {
 		}
 		q.order = append(q.order, orderTerm{col: col, desc: desc})
 	}
+	return q
+}
+
+// GroupBy adds a GROUP BY clause over the given columns. Pair it with aggregate
+// projection columns via Select and filter the groups with Having. The COUNT(*)
+// OVER() fast total then counts result groups, so pagination over grouped rows
+// still reports an accurate total.
+func (q *Query) GroupBy(cols ...string) *Query {
+	q.groupBy = append(q.groupBy, cols...)
+	return q
+}
+
+// Having sets a HAVING condition, applied after grouping. Its placeholders
+// follow the WHERE arguments. A predicate on a plain grouped column can use the
+// ordinary constructors (filtrx.Gt("price", 100)); for an aggregate, whose
+// expression must not be quoted as an identifier, use filtrx.Raw —
+// filtrx.Raw("COUNT(*) > ?", 1).
+func (q *Query) Having(c Cond) *Query {
+	q.having = c
 	return q
 }
 
@@ -254,14 +312,27 @@ func (q *Query) fromClause() string {
 	return q.from.render(q.dialect)
 }
 
-// count runs SELECT COUNT(*) for the filter, ignoring ordering and paging.
+// count runs SELECT COUNT(*) for the filter, ignoring ordering and paging. When
+// the query groups, the count is the number of groups, obtained by wrapping the
+// grouped SELECT in a COUNT(*) subquery.
 func count(ctx context.Context, db sqlx.QueryerContext, q *Query, where string, args []any) (int, error) {
 	var sb strings.Builder
-	sb.WriteString("SELECT COUNT(*) FROM ")
-	sb.WriteString(q.fromClause())
-	if where != "" {
-		sb.WriteString(" WHERE ")
-		sb.WriteString(where)
+	if q.hasGrouping() {
+		sb.WriteString("SELECT COUNT(*) FROM (SELECT 1 FROM ")
+		sb.WriteString(q.fromClause())
+		if where != "" {
+			sb.WriteString(" WHERE ")
+			sb.WriteString(where)
+		}
+		args = q.writeGroupHaving(&sb, args)
+		sb.WriteString(") AS _filtrx_grp")
+	} else {
+		sb.WriteString("SELECT COUNT(*) FROM ")
+		sb.WriteString(q.fromClause())
+		if where != "" {
+			sb.WriteString(" WHERE ")
+			sb.WriteString(where)
+		}
 	}
 	var n int
 	row := db.QueryRowxContext(ctx, sb.String(), args...)
@@ -353,8 +424,41 @@ func (q *Query) writeProjection(sb *strings.Builder) {
 	}
 }
 
+// writeGroupHaving appends GROUP BY and HAVING after the WHERE clause, returning
+// the running argument list (whereArgs plus any HAVING args). HAVING placeholders
+// continue the WHERE numbering. HAVING is valid without GROUP BY (an aggregate
+// over the whole table), so the two are emitted independently.
+func (q *Query) writeGroupHaving(sb *strings.Builder, whereArgs []any) []any {
+	if len(q.groupBy) > 0 {
+		sb.WriteString(" GROUP BY ")
+		for i, c := range q.groupBy {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(q.dialect.quoteIdent(c))
+		}
+	}
+	if q.having == nil {
+		return whereArgs
+	}
+	hs, ha := buildAt(q.having, q.dialect, len(whereArgs))
+	if hs == "" {
+		return whereArgs
+	}
+	sb.WriteString(" HAVING ")
+	sb.WriteString(hs)
+	return append(whereArgs, ha...)
+}
+
+// hasGrouping reports whether the query groups or filters groups, so counting
+// must wrap the grouped result rather than COUNT(*) the base rows.
+func (q *Query) hasGrouping() bool {
+	return len(q.groupBy) > 0 || q.having != nil
+}
+
 // writeOrder appends an ORDER BY clause for the given terms, quoting each column
-// per the dialect. It writes nothing for an empty term list.
+// per the dialect and applying any explicit NULL placement. It writes nothing
+// for an empty term list.
 func (q *Query) writeOrder(sb *strings.Builder, order []orderTerm) {
 	if len(order) == 0 {
 		return
@@ -364,10 +468,7 @@ func (q *Query) writeOrder(sb *strings.Builder, order []orderTerm) {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(q.dialect.quoteIdent(o.col))
-		if o.desc {
-			sb.WriteString(" DESC")
-		}
+		sb.WriteString(orderClause(q.dialect, q.dialect.quoteIdent(o.col), o.desc, o.nulls))
 	}
 }
 
@@ -385,9 +486,9 @@ func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, wi
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
+	args := q.writeGroupHaving(&sb, whereArgs)
 	q.writeOrder(&sb, q.order)
-	args := whereArgs
-	n := len(whereArgs)
+	n := len(args)
 	switch {
 	case limit > 0:
 		// Fetch one extra row to detect whether more records follow the window.

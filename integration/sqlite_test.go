@@ -15,7 +15,7 @@ func TestSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// An in-memory SQLite database is private to a single connection; pin the
 	// pool to one so the schema persists across the suite's queries.
 	db.SetMaxOpenConns(1)

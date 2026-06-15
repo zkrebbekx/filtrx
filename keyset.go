@@ -3,6 +3,7 @@ package filtrx
 import (
 	"bytes"
 	"context"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -64,15 +65,43 @@ func (q *Query) Seek(p SeekParams) *Query {
 	return q
 }
 
-// listKeyset runs a Query in keyset mode: it seeks past the cursor (if any),
-// fetches one extra row to detect a following page, restores natural order for a
-// backward page, and emits the start/end cursors for the returned window.
+// keysetResult is the outcome of a keyset scan shared by List (offset-style
+// PageInfo) and ListConnection (Relay edges): one opaque cursor per returned
+// row, whether a further page exists in the paging direction, and the total when
+// it was requested.
+type keysetResult struct {
+	cursors   []Cursor
+	truncated bool
+	total     int
+	totalSet  bool
+}
+
+// listKeyset runs a Query in keyset mode and reports the window as a PageInfo.
 func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, dest *[]T) (PageInfo, error) {
+	res, err := runKeyset(ctx, db, q, dest)
+	if err != nil {
+		return PageInfo{}, err
+	}
+	info := PageInfo{Truncated: res.truncated}
+	if n := len(res.cursors); n > 0 {
+		info.StartCursor = res.cursors[0]
+		info.EndCursor = res.cursors[n-1]
+	}
+	if res.totalSet {
+		info.Total = res.total
+	}
+	return info, nil
+}
+
+// runKeyset seeks past the cursor (if any), fetches one extra row to detect a
+// following page, restores natural order for a backward page, and returns one
+// cursor per returned row.
+func runKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, dest *[]T) (keysetResult, error) {
 	if len(q.order) == 0 {
-		return PageInfo{}, fmt.Errorf("%w: keyset pagination requires at least one OrderBy", ErrCompile)
+		return keysetResult{}, fmt.Errorf("%w: keyset pagination requires at least one OrderBy", ErrCompile)
 	}
 	if q.seek.size <= 0 {
-		return PageInfo{}, fmt.Errorf("%w: Seek size must be positive", ErrCompile)
+		return keysetResult{}, fmt.Errorf("%w: Seek size must be positive", ErrCompile)
 	}
 
 	var zero T
@@ -88,7 +117,7 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 	keyTraversals := defaultMapper.TraversalsByName(rowType, keyCols)
 	for i, tr := range keyTraversals {
 		if len(tr) == 0 {
-			return PageInfo{}, fmt.Errorf("%w: keyset order column %q has no matching field on %s", ErrCompile, q.order[i].col, rowType)
+			return keysetResult{}, fmt.Errorf("%w: keyset order column %q has no matching field on %s", ErrCompile, q.order[i].col, rowType)
 		}
 	}
 
@@ -98,10 +127,10 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 	if q.seek.cursor != "" {
 		vals, err := decodeCursor(q.seek.cursor)
 		if err != nil {
-			return PageInfo{}, fmt.Errorf("%w: %w", ErrCompile, err)
+			return keysetResult{}, fmt.Errorf("%w: %w", ErrCompile, err)
 		}
 		if len(vals) != len(q.order) {
-			return PageInfo{}, fmt.Errorf("%w: cursor carries %d values but the query orders by %d columns", ErrCompile, len(vals), len(q.order))
+			return keysetResult{}, fmt.Errorf("%w: cursor carries %d values but the query orders by %d columns", ErrCompile, len(vals), len(q.order))
 		}
 		cond = And(q.cond, keysetCond(q.order, vals, q.seek.before))
 	}
@@ -113,20 +142,20 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 	if q.seek.before {
 		order = make([]orderTerm, len(q.order))
 		for i, o := range q.order {
-			order[i] = orderTerm{col: o.col, desc: !o.desc}
+			order[i] = orderTerm{col: o.col, desc: !o.desc, nulls: flipNulls(o.nulls)}
 		}
 	}
 
 	query, args := q.buildKeysetSelect(where, whereArgs, order, q.seek.size+1)
 	rows, err := db.QueryxContext(ctx, query, args...)
 	if err != nil {
-		return PageInfo{}, fmt.Errorf("%w: %w", ErrQuery, err)
+		return keysetResult{}, fmt.Errorf("%w: %w", ErrQuery, err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return PageInfo{}, fmt.Errorf("%w: columns: %w", ErrQuery, err)
+		return keysetResult{}, fmt.Errorf("%w: columns: %w", ErrQuery, err)
 	}
 	colTraversals := defaultMapper.TraversalsByName(rowType, cols)
 
@@ -147,7 +176,7 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 			}
 		}
 		if err := rows.Scan(holders...); err != nil {
-			return PageInfo{}, fmt.Errorf("%w: scan: %w", ErrQuery, err)
+			return keysetResult{}, fmt.Errorf("%w: scan: %w", ErrQuery, err)
 		}
 		key := make([]any, len(keyTraversals))
 		for i, tr := range keyTraversals {
@@ -157,13 +186,13 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
-		return PageInfo{}, fmt.Errorf("%w: %w", ErrQuery, err)
+		return keysetResult{}, fmt.Errorf("%w: %w", ErrQuery, err)
 	}
 
-	var info PageInfo
+	var res keysetResult
 	// The extra row reveals a further page in the paging direction; drop it.
 	if len(keys) > q.seek.size {
-		info.Truncated = true
+		res.truncated = true
 		*dest = (*dest)[:start+q.seek.size]
 		keys = keys[:q.seek.size]
 	}
@@ -173,24 +202,24 @@ func listKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, de
 		reverse(keys)
 	}
 
-	if n := len(keys); n > 0 {
-		if info.StartCursor, err = encodeCursor(keys[0]); err != nil {
-			return PageInfo{}, err
+	res.cursors = make([]Cursor, len(keys))
+	for i, k := range keys {
+		c, cerr := encodeCursor(k)
+		if cerr != nil {
+			return keysetResult{}, cerr
 		}
-		if info.EndCursor, err = encodeCursor(keys[n-1]); err != nil {
-			return PageInfo{}, err
-		}
+		res.cursors[i] = c
 	}
 
 	if q.seek.total {
 		baseWhere, baseArgs := Build(q.cond, q.dialect)
 		n, cerr := count(ctx, db, q, baseWhere, baseArgs)
 		if cerr != nil {
-			return PageInfo{}, cerr
+			return keysetResult{}, cerr
 		}
-		info.Total = n
+		res.total, res.totalSet = n, true
 	}
-	return info, nil
+	return res, nil
 }
 
 // buildKeysetSelect renders the seek query: projection, FROM, optional WHERE, the
@@ -206,10 +235,11 @@ func (q *Query) buildKeysetSelect(where string, whereArgs []any, order []orderTe
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
+	args := q.writeGroupHaving(&sb, whereArgs)
 	q.writeOrder(&sb, order)
 	sb.WriteString(" LIMIT ")
-	sb.WriteString(q.dialect.placeholder(len(whereArgs) + 1))
-	return sb.String(), append(whereArgs, limit)
+	sb.WriteString(q.dialect.placeholder(len(args) + 1))
+	return sb.String(), append(args, limit)
 }
 
 // keysetCond builds the lexicographic "row is past the boundary" predicate for
@@ -221,22 +251,72 @@ func (q *Query) buildKeysetSelect(where string, whereArgs []any, order []orderTe
 //
 //	ORDER BY a ASC, b DESC, with values (va, vb), forward:
 //	  (a > va) OR (a = va AND b < vb)
+//
+// A boundary value may be nil when the order term declares a NULL placement
+// (OrderByNulls); the equality prefix becomes IS NULL and the comparison honours
+// where NULLs sort. A position that has nothing sorting strictly after it (e.g. a
+// NULL boundary under NULLS LAST going forward) contributes no branch.
 func keysetCond(order []orderTerm, vals []any, before bool) Cond {
-	branches := make([]Cond, len(order))
+	var branches []Cond
 	for i := range order {
+		cmp := afterCompare(order[i], vals[i], before)
+		if cmp == nil {
+			continue
+		}
 		ands := make([]Cond, 0, i+1)
 		for j := 0; j < i; j++ {
-			ands = append(ands, Eq(order[j].col, vals[j]))
+			ands = append(ands, nullEq(order[j].col, vals[j]))
 		}
-		ascending := order[i].desc == before // desc flips it; before flips again
-		if ascending {
-			ands = append(ands, Gt(order[i].col, vals[i]))
-		} else {
-			ands = append(ands, Lt(order[i].col, vals[i]))
-		}
-		branches[i] = And(ands...)
+		ands = append(ands, cmp)
+		branches = append(branches, And(ands...))
+	}
+	if len(branches) == 0 {
+		// Nothing sorts strictly after the boundary (it is the last row in order):
+		// the next page is empty. Match nothing rather than emitting an empty group.
+		return Raw("1=0")
 	}
 	return Or(branches...)
+}
+
+// nullEq is a NULL-safe equality for an equality prefix: IS NULL when the
+// boundary value is nil, plain equality otherwise.
+func nullEq(col string, v any) Cond {
+	if v == nil {
+		return IsNull(col)
+	}
+	return Eq(col, v)
+}
+
+// afterCompare returns the predicate selecting rows that sort strictly after
+// value v at column t, honouring direction and NULL placement. It returns nil
+// when nothing sorts after v at this position. Paging backward (before) reverses
+// both the direction and the NULL placement.
+func afterCompare(t orderTerm, v any, before bool) Cond {
+	ascending := t.desc == before
+	nulls := t.nulls
+	if before {
+		nulls = flipNulls(nulls)
+	}
+	if v == nil {
+		// After a NULL: under NULLS FIRST the non-NULLs all follow; under NULLS
+		// LAST nothing follows (deeper tiebreakers are handled by other branches).
+		if nulls == nullsFirst {
+			return IsNotNull(t.col)
+		}
+		return nil
+	}
+	var base Cond
+	if ascending {
+		base = Gt(t.col, v)
+	} else {
+		base = Lt(t.col, v)
+	}
+	// Under NULLS LAST the NULLs sort after every non-NULL, so they too are "after"
+	// a non-NULL boundary; include them.
+	if nulls == nullsLast {
+		return Or(base, IsNull(t.col))
+	}
+	return base
 }
 
 // unqualify strips a table qualifier from a column reference: "u.id" -> "id".
@@ -263,9 +343,10 @@ type cursorElem struct {
 	V any    `json:"v"`
 }
 
-// encodeCursor packs boundary values into an opaque URL-safe token. A NULL value
-// is rejected: keyset columns must be NOT NULL for the seek predicate to be
-// correct and portable.
+// encodeCursor packs boundary values into an opaque URL-safe token. A NULL key
+// (a nil pointer, an unset Opt, or a NULL sql.Null* value) is encoded as a null
+// element; it is only meaningful for an order term that declares a NULL position
+// via OrderByNulls.
 func encodeCursor(vals []any) (Cursor, error) {
 	elems := make([]cursorElem, len(vals))
 	for i, v := range vals {
@@ -285,13 +366,31 @@ func encodeCursor(vals []any) (Cursor, error) {
 func toCursorElem(v any) (cursorElem, error) {
 	switch x := v.(type) {
 	case nil:
-		return cursorElem{}, fmt.Errorf("filtrx: keyset order column is NULL; keyset columns must be NOT NULL")
+		return cursorElem{T: "0"}, nil
 	case time.Time:
 		return cursorElem{"t", x.Format(time.RFC3339Nano)}, nil
 	case []byte:
 		return cursorElem{"x", base64.StdEncoding.EncodeToString(x)}, nil
 	}
 	rv := reflect.ValueOf(v)
+	// A nullable key scans into a pointer or a driver.Valuer (sql.Null*, Opt);
+	// unwrap it to the underlying value, or a null element when absent.
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return cursorElem{T: "0"}, nil
+		}
+		return toCursorElem(rv.Elem().Interface())
+	}
+	if valuer, ok := v.(driver.Valuer); ok {
+		dv, err := valuer.Value()
+		if err != nil {
+			return cursorElem{}, fmt.Errorf("filtrx: cursor value: %w", err)
+		}
+		if dv == nil {
+			return cursorElem{T: "0"}, nil
+		}
+		return toCursorElem(dv)
+	}
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return cursorElem{"i", rv.Int()}, nil
@@ -335,6 +434,8 @@ func decodeCursor(c Cursor) ([]any, error) {
 
 func fromCursorElem(e cursorElem) (any, error) {
 	switch e.T {
+	case "0":
+		return nil, nil
 	case "i":
 		num, ok := e.V.(json.Number)
 		if !ok {

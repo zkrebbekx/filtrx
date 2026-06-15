@@ -33,7 +33,8 @@ PagingParams ──Paginate──▶ limit/offset + needsTotal
 | `plan.go`     | Reflection: compile a tagged struct to a `Cond`, cached per type.    |
 | `paginate.go` | `PagingParams`, `PageInfo`, `Paginate`, `TruncateAt`.                |
 | `keyset.go`   | `Seek`/`SeekParams`, opaque `Cursor`, keyset (seek) pagination.      |
-| `query.go`    | `Query` builder + `List[T]`: filter + page + fast total + scan.      |
+| `connection.go`| `Connection[T]`/`ListConnection`: GraphQL Relay edges + page info.   |
+| `query.go`    | `Query` builder + `List[T]`: filter + page + group + fast total + scan.|
 | `integration/`| Separate module; the same BDD suite run against SQLite/Postgres/MySQL.|
 
 The predicate tree is the safe core. Everything that accepts user input

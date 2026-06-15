@@ -105,6 +105,12 @@ type productWithReview struct {
 	Reviews filtrx.Exists[reviewSub] `exists:"reviews r" on:"r.product_id = p.id"`
 }
 
+// reviewCount is the scan target for a grouped aggregate over reviews.
+type reviewCount struct {
+	ProductID int `db:"product_id"`
+	N         int `db:"n"`
+}
+
 // productByTier joins products to categories and filters on the category tier,
 // declaring the source entirely through marker fields.
 type productByTier struct {
@@ -301,6 +307,44 @@ func runSuite(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
 				So(info1.Truncated, ShouldBeTrue)
 				So(ids(page2), ShouldResemble, []int{3, 4})
 				So(ids(back), ShouldResemble, []int{1, 2})
+			})
+		})
+
+		Convey("When grouping with a HAVING over an aggregate", func() {
+			var got []reviewCount
+			_, err := filtrx.List(ctx, db,
+				From(d, "reviews").
+					Select("product_id", "COUNT(*) AS n").
+					GroupBy("product_id").
+					Having(filtrx.Raw("COUNT(*) >= ?", 2)).
+					OrderBy("product_id"),
+				&got)
+			Convey("Then only groups passing the HAVING come back", func() {
+				So(err, ShouldBeNil)
+				// Only product 1 has two reviews; products 2 and 4 have one each.
+				So(got, ShouldResemble, []reviewCount{{ProductID: 1, N: 2}})
+			})
+		})
+
+		Convey("When paging products as a Relay connection", func() {
+			conn, err := filtrx.ListConnection[product](ctx, db,
+				From(d, "products").OrderBy("id").Seek(filtrx.SeekParams{Size: 2}))
+			So(err, ShouldBeNil)
+
+			conn2, err := filtrx.ListConnection[product](ctx, db,
+				From(d, "products").OrderBy("id").
+					Seek(filtrx.SeekParams{After: conn.PageInfo.EndCursor, Size: 2}))
+			So(err, ShouldBeNil)
+
+			Convey("Then edges carry cursors and page info chains forward", func() {
+				So(len(conn.Edges), ShouldEqual, 2)
+				So(conn.Edges[0].Node.ID, ShouldEqual, 1)
+				So(conn.Edges[0].Cursor, ShouldNotBeEmpty)
+				So(conn.PageInfo.HasNextPage, ShouldBeTrue)
+				So(conn.PageInfo.HasPreviousPage, ShouldBeFalse)
+
+				So(conn2.Edges[0].Node.ID, ShouldEqual, 3)
+				So(conn2.PageInfo.HasPreviousPage, ShouldBeTrue)
 			})
 		})
 

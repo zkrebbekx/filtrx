@@ -33,7 +33,7 @@ func TestMySQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	runSuite(t, db, filtrx.MySQL)
 }
