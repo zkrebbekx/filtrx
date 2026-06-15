@@ -27,6 +27,7 @@ type Query struct {
 	cond    Cond
 	order   []orderTerm
 	paging  PagingParams
+	seek    *seekState
 	dialect Dialect
 	err     error
 }
@@ -167,6 +168,10 @@ func (q *Query) On(d Dialect) *Query {
 func List[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, dest *[]T) (PageInfo, error) {
 	if q.err != nil {
 		return PageInfo{}, fmt.Errorf("%w: %w", ErrCompile, q.err)
+	}
+
+	if q.seek != nil {
+		return listKeyset(ctx, db, q, dest)
 	}
 
 	where, whereArgs := Build(q.cond, q.dialect)
@@ -326,9 +331,9 @@ func selectRows[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, wh
 	return scanned, sink, nil
 }
 
-func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, window bool) (string, []any) {
-	var sb strings.Builder
-	sb.WriteString("SELECT ")
+// writeProjection writes the SELECT column list: the explicit columns, or the
+// base table's columns when a join alias is set, or "*".
+func (q *Query) writeProjection(sb *strings.Builder) {
 	switch {
 	case len(q.columns) > 0:
 		for i, c := range q.columns {
@@ -346,6 +351,30 @@ func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, wi
 	default:
 		sb.WriteString("*")
 	}
+}
+
+// writeOrder appends an ORDER BY clause for the given terms, quoting each column
+// per the dialect. It writes nothing for an empty term list.
+func (q *Query) writeOrder(sb *strings.Builder, order []orderTerm) {
+	if len(order) == 0 {
+		return
+	}
+	sb.WriteString(" ORDER BY ")
+	for i, o := range order {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(q.dialect.quoteIdent(o.col))
+		if o.desc {
+			sb.WriteString(" DESC")
+		}
+	}
+}
+
+func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, window bool) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	q.writeProjection(&sb)
 	if window {
 		sb.WriteString(", COUNT(*) OVER() AS ")
 		sb.WriteString(totalColumn)
@@ -356,18 +385,7 @@ func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, wi
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
-	if len(q.order) > 0 {
-		sb.WriteString(" ORDER BY ")
-		for i, o := range q.order {
-			if i > 0 {
-				sb.WriteString(", ")
-			}
-			sb.WriteString(q.dialect.quoteIdent(o.col))
-			if o.desc {
-				sb.WriteString(" DESC")
-			}
-		}
-	}
+	q.writeOrder(&sb, q.order)
 	args := whereArgs
 	n := len(whereArgs)
 	switch {

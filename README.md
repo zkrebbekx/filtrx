@@ -232,12 +232,47 @@ ORDER BY "u"."id" LIMIT $3 OFFSET $4
 > join (a user's *many* orders) fans the result out: the base row repeats once
 > per match, which duplicates rows in the page, inflates the `COUNT(*) OVER()`
 > total, and makes `LIMIT`/offset count joined rows instead of entities. For
-> one-to-many filtering, filter against a pre-joined view, or use a correlated
-> `EXISTS` via `filtrx.Raw` in the `Where` tree, rather than a `Join`.
+> one-to-many filtering use **`Exists`** (below), not a `Join`.
 >
 > Portability: `full` joins aren't supported by MySQL and only by recent SQLite.
 > Keep table aliases lowercase — the `on` expression is emitted verbatim, so a
 > quoted mixed-case alias (`as:"U"`) won't match an unquoted `U` in `on`.
+
+### One-to-many: `Exists`
+
+To filter the base table by its *many* side without fan-out, declare an
+`Exists[T]` field. It compiles to a correlated `EXISTS` subquery, so the base
+row is tested — never multiplied — and the page count stays accurate. The nested
+struct `T` supplies the child-table predicates; the `exists` and `on` tags name
+the subquery source and its correlation.
+
+```go
+type OrderSub struct {
+	Status filtrx.Text       `col:"o.status"`
+	Total  filtrx.Range[int] `col:"o.total"`
+}
+type CustomerFilter struct {
+	Base   filtrx.Table            `table:"customers" as:"c"`
+	Status filtrx.Text             `col:"c.status"`
+	Orders filtrx.Exists[OrderSub] `exists:"orders o" on:"o.customer_id = c.id"`
+}
+
+f := CustomerFilter{
+	Orders: filtrx.Exists[OrderSub]{
+		When: filtrx.Some(true), // Some(false) → NOT EXISTS; unset → ignored
+		Sub:  OrderSub{Status: filtrx.Text{Eq: filtrx.Some("paid")}},
+	},
+}
+```
+→
+```sql
+EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND "o"."status" = $1)
+```
+
+`When` is the request-friendly toggle: leave it unset to ignore the relationship,
+`Some(true)` for `EXISTS`, `Some(false)` for `NOT EXISTS`. Like a join's `on`,
+the `exists` and `on` tags are emitted verbatim — never build them from request
+data. The child predicates in `Sub` are parameterised normally.
 
 ## Pagination
 
@@ -274,6 +309,53 @@ paginator, needsTotal := filtrx.Paginate(params)
 if needsTotal { /* SELECT COUNT(*) ... */ }
 limit, offset := paginator(total)
 ```
+
+### Keyset (cursor) pagination
+
+Offset paging re-scans every skipped row, so page 10,000 is slow. **Keyset
+paging** seeks straight past the last row instead — its cost is flat no matter
+how deep the page. Switch a query to it with `Seek`; the `OrderBy` terms are both
+the sort and the cursor key.
+
+```go
+q := filtrx.From("events").
+	Where(f).
+	OrderByDesc("created_at").
+	OrderBy("id"). // unique tiebreaker → a total order
+	Seek(filtrx.SeekParams{Size: 20})
+
+var page []Event
+info, err := filtrx.List(ctx, db, q, &page)
+
+// info.EndCursor is the token for the next page — rebuild the same query,
+// seeking after it:
+q = filtrx.From("events").Where(f).OrderByDesc("created_at").OrderBy("id").
+	Seek(filtrx.SeekParams{After: info.EndCursor, Size: 20})
+```
+→
+```sql
+SELECT * FROM "events"
+ORDER BY "created_at" DESC, "id"
+LIMIT $1            -- Size+1, to detect a following page
+
+-- next page, After the cursor (created_at=t, id=n):
+WHERE ("created_at" < $1 OR ("created_at" = $2 AND "id" > $3))
+ORDER BY "created_at" DESC, "id" LIMIT $4
+```
+
+- **Cursors are opaque.** `StartCursor`/`EndCursor` on `PageInfo` are URL-safe
+  tokens that encode the row's ordering values (type-tagged so an integer comes
+  back an integer, a timestamp a timestamp). Pass `EndCursor` as the next page's
+  `After`, or `StartCursor` as a previous page's `Before`. Don't parse them.
+- **`Truncated`** means more rows exist in the paging direction — your
+  `hasNextPage` (forward) or `hasPreviousPage` (backward).
+- **Mixed `ASC`/`DESC` is fine.** The seek predicate expands to a portable
+  lexicographic `OR`-of-`AND` rather than a row-value comparison, so directions
+  can differ per column across Postgres, MySQL and SQLite.
+- **Keyset key columns must be `NOT NULL`** and form a total order (end with a
+  unique column). NULLs have no portable seek semantics, so they're rejected.
+- Keyset doesn't compute a total by default (that's the point); set
+  `IncludeTotal` to pay one extra `COUNT`.
 
 ## Dialects
 

@@ -80,6 +80,33 @@ func ExampleBind() {
 	// active 18 65 admin mod
 }
 
+// Filter a base table by a one-to-many relationship without fan-out, using a
+// correlated EXISTS declared on the filter struct.
+func ExampleExists() {
+	type orderSub struct {
+		Status filtrx.Text `col:"o.status"`
+	}
+	type customerFilter struct {
+		Base   filtrx.Table            `table:"customers" as:"c"`
+		Status filtrx.Text             `col:"c.status"`
+		Orders filtrx.Exists[orderSub] `exists:"orders o" on:"o.customer_id = c.id"`
+	}
+
+	f := customerFilter{
+		Status: filtrx.Text{Eq: filtrx.Some("active")},
+		Orders: filtrx.Exists[orderSub]{
+			When: filtrx.Some(true),
+			Sub:  orderSub{Status: filtrx.Text{Eq: filtrx.Some("paid")}},
+		},
+	}
+
+	cond, _ := filtrx.Where(f)
+	sql, _ := filtrx.Build(cond, filtrx.Postgres)
+	fmt.Println(sql)
+	// Output:
+	// ("c"."status" = $1 AND EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND "o"."status" = $2))
+}
+
 // Resolve pagination into a limit and offset.
 func ExamplePaginate() {
 	first := 10

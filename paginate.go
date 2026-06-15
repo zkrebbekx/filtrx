@@ -11,8 +11,16 @@ type PageInfo struct {
 	// full filtered set — the basis for the next/previous cursor.
 	Offset int
 	// Truncated reports that more records exist past the returned window, i.e.
-	// the query was limited and a further row was available.
+	// the query was limited and a further row was available. In keyset mode
+	// (Seek) it means more rows exist in the paging direction — the basis for
+	// hasNextPage (forward) or hasPreviousPage (backward).
 	Truncated bool
+	// StartCursor and EndCursor are the opaque keyset cursors for the first and
+	// last returned rows. They are set only by Seek (keyset) pagination; pass
+	// EndCursor as the next page's After, or StartCursor as the previous page's
+	// Before. They are empty for offset pagination and for an empty page.
+	StartCursor Cursor
+	EndCursor   Cursor
 }
 
 // PagingParams captures pagination arguments in the Relay style, but over record

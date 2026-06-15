@@ -64,15 +64,19 @@ const (
 	stepScalar                    // Opt[T] field, single operator
 	stepSlice                     // slice field, IN / NOT IN
 	stepGroup                     // slice-of-struct field, And/Or recursion
+	stepExists                    // Exists[T] field, correlated EXISTS subquery
 )
 
 type fieldStep struct {
-	idx   int
-	kind  stepKind
-	col   string
-	op    op
-	or    bool
-	elemT reflect.Type
+	idx    int
+	kind   stepKind
+	col    string
+	op     op
+	or     bool
+	elemT  reflect.Type
+	src    string // stepExists: verbatim subquery source ("orders o")
+	on     string // stepExists: verbatim correlation ("o.user_id = u.id")
+	subIdx int    // stepExists: index of the Sub field within Exists[T]
 }
 
 type plan struct {
@@ -99,6 +103,7 @@ type fieldRole int
 const (
 	roleNone      fieldRole = iota // not a filter field
 	roleGroup                      // slice-of-struct with a group tag (And/Or)
+	roleExists                     // Exists[T], a correlated EXISTS subquery
 	rolePredicate                  // type implements Predicate (Range/Match/Text)
 	roleScalar                     // Opt[T], a single operator
 	roleSlice                      // slice, IN / NOT IN
@@ -113,6 +118,8 @@ func classifyField(f reflect.StructField) fieldRole {
 		return roleGroup
 	}
 	switch {
+	case f.Type.Implements(existsHolderT):
+		return roleExists
 	case f.Type.Implements(predicateT):
 		return rolePredicate
 	case f.Type.Implements(setterT):
@@ -180,6 +187,12 @@ func buildPlan(t reflect.Type) (*plan, error) {
 				return nil, err
 			}
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepGroup, or: or, elemT: f.Type.Elem()})
+		case roleExists:
+			step, err := existsStep(f, i)
+			if err != nil {
+				return nil, err
+			}
+			p.steps = append(p.steps, step)
 		case rolePredicate:
 			p.steps = append(p.steps, fieldStep{idx: i, kind: stepPredicate, col: col})
 		case roleScalar:
@@ -235,6 +248,21 @@ func (p *plan) build(v reflect.Value) Cond {
 			if len(children) > 0 {
 				conds = append(conds, group{or: s.or, conds: children})
 			}
+		case stepExists:
+			active, negate := fv.Interface().(existsHolder).existsActive()
+			if !active {
+				continue
+			}
+			sub, err := planFor(s.elemT)
+			if err != nil {
+				continue // validated at plan time
+			}
+			conds = append(conds, exists{
+				negate: negate,
+				src:    s.src,
+				on:     s.on,
+				inner:  sub.build(fv.Field(s.subIdx)),
+			})
 		}
 	}
 	if len(conds) == 0 {
@@ -269,6 +297,29 @@ func scalarOp(f reflect.StructField) (op, error) {
 	return o, nil
 }
 
+// existsStep validates an Exists[T] field and compiles its plan step. The
+// subquery source and correlation come from the exists and on tags; the nested
+// filter type T is validated (and cached) up front so a malformed child surfaces
+// at plan time, not at query time.
+func existsStep(f reflect.StructField, idx int) (fieldStep, error) {
+	src := f.Tag.Get("exists")
+	if src == "" {
+		return fieldStep{}, fmt.Errorf("filtrx: Exists field %s needs an exists tag naming the subquery table", f.Name)
+	}
+	on := f.Tag.Get("on")
+	if on == "" {
+		return fieldStep{}, fmt.Errorf("filtrx: Exists field %s needs an on tag correlating the subquery", f.Name)
+	}
+	subField, ok := f.Type.FieldByName("Sub")
+	if !ok || subField.Type.Kind() != reflect.Struct {
+		return fieldStep{}, fmt.Errorf("filtrx: Exists field %s has a non-struct Sub filter", f.Name)
+	}
+	if _, err := planFor(subField.Type); err != nil {
+		return fieldStep{}, err
+	}
+	return fieldStep{idx: idx, kind: stepExists, src: src, on: on, elemT: subField.Type, subIdx: subField.Index[0]}, nil
+}
+
 func groupOr(tag, field string) (bool, error) {
 	switch strings.ToLower(tag) {
 	case "or":
@@ -284,7 +335,8 @@ func hasFilterTag(f reflect.StructField) bool {
 	_, col := f.Tag.Lookup("col")
 	_, o := f.Tag.Lookup("op")
 	_, g := f.Tag.Lookup("group")
-	return col || o || g
+	_, e := f.Tag.Lookup("exists")
+	return col || o || g || e
 }
 
 // snake converts an exported Go field name to snake_case for a default column.

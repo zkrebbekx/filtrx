@@ -29,8 +29,10 @@ PagingParams ──Paginate──▶ limit/offset + needsTotal
 | `cond.go`     | The `Cond` predicate tree, `Build`, and the `And/Or/Eq/...` builders. |
 | `dialect.go`  | `Dialect`: placeholders, identifier quoting, "all rows" limit.       |
 | `holders.go`  | Generic filter holders `Range[T]`, `Match[T]`, `Text`; `Predicate`.  |
+| `exists.go`   | `Exists[T]` holder → correlated `EXISTS` for one-to-many filtering.   |
 | `plan.go`     | Reflection: compile a tagged struct to a `Cond`, cached per type.    |
 | `paginate.go` | `PagingParams`, `PageInfo`, `Paginate`, `TruncateAt`.                |
+| `keyset.go`   | `Seek`/`SeekParams`, opaque `Cursor`, keyset (seek) pagination.      |
 | `query.go`    | `Query` builder + `List[T]`: filter + page + fast total + scan.      |
 | `integration/`| Separate module; the same BDD suite run against SQLite/Postgres/MySQL.|
 

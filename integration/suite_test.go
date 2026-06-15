@@ -73,6 +73,36 @@ func setupSchema(ctx context.Context, t *testing.T, db *sqlx.DB) {
 		db.MustExecContext(ctx, db.Rebind(
 			`INSERT INTO categories (name, tier) VALUES (?, ?)`), name, tier)
 	}
+
+	// A one-to-many table to exercise Exists: a product has many reviews.
+	db.MustExecContext(ctx, `DROP TABLE IF EXISTS reviews`)
+	db.MustExecContext(ctx, `CREATE TABLE reviews (
+		id         INTEGER PRIMARY KEY,
+		product_id INTEGER NOT NULL,
+		rating     INTEGER NOT NULL
+	)`)
+	reviews := []struct{ id, productID, rating int }{
+		{1, 1, 5}, {2, 1, 3}, // Hammer has two reviews, one five-star
+		{3, 2, 4}, // Wrench has a four-star
+		{4, 4, 5}, // Apple has a five-star
+	}
+	for _, r := range reviews {
+		db.MustExecContext(ctx, db.Rebind(
+			`INSERT INTO reviews (id, product_id, rating) VALUES (?, ?, ?)`),
+			r.id, r.productID, r.rating)
+	}
+}
+
+// reviewSub filters the child reviews table inside an Exists subquery.
+type reviewSub struct {
+	Rating filtrx.Range[int] `col:"r.rating"`
+}
+
+// productWithReview filters products by their one-to-many reviews, without
+// fanning the result out, via a correlated EXISTS.
+type productWithReview struct {
+	Base    filtrx.Table             `table:"products" as:"p"`
+	Reviews filtrx.Exists[reviewSub] `exists:"reviews r" on:"r.product_id = p.id"`
 }
 
 // productByTier joins products to categories and filters on the category tier,
@@ -208,6 +238,69 @@ func runSuite(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
 				So(err, ShouldBeNil)
 				So(ids(got), ShouldResemble, []int{1, 2, 3})
 				So(info.Total, ShouldEqual, 3)
+			})
+		})
+
+		Convey("When filtering a one-to-many relation with Exists", func() {
+			var got []product
+			info, err := filtrx.List(ctx, db,
+				filtrx.For(productWithReview{
+					Reviews: filtrx.Exists[reviewSub]{
+						When: filtrx.Some(true),
+						Sub:  reviewSub{Rating: filtrx.Range[int]{Gte: filtrx.Some(5)}},
+					},
+				}).On(d).OrderBy("p.id").
+					Page(filtrx.PagingParams{First: ptr(10), IncludeTotal: true}),
+				&got)
+			Convey("Then each matching base row appears once, with no fan-out", func() {
+				So(err, ShouldBeNil)
+				// Hammer (id 1) has two reviews but must appear once; Apple (id 4)
+				// also has a five-star. The total counts entities, not joined rows.
+				So(ids(got), ShouldResemble, []int{1, 4})
+				So(info.Total, ShouldEqual, 2)
+			})
+		})
+
+		Convey("When NOT EXISTS excludes rows with a matching child", func() {
+			var got []product
+			_, err := filtrx.List(ctx, db,
+				filtrx.For(productWithReview{
+					Reviews: filtrx.Exists[reviewSub]{When: filtrx.Some(false)},
+				}).On(d).OrderBy("p.id"),
+				&got)
+			Convey("Then only products with no review at all remain", func() {
+				So(err, ShouldBeNil)
+				So(ids(got), ShouldResemble, []int{3, 5, 6})
+			})
+		})
+
+		Convey("When paging by keyset cursor forward then backward", func() {
+			var page1 []product
+			info1, err := filtrx.List(ctx, db,
+				From(d, "products").OrderBy("id").
+					Seek(filtrx.SeekParams{Size: 2}),
+				&page1)
+			So(err, ShouldBeNil)
+
+			var page2 []product
+			info2, err := filtrx.List(ctx, db,
+				From(d, "products").OrderBy("id").
+					Seek(filtrx.SeekParams{After: info1.EndCursor, Size: 2}),
+				&page2)
+			So(err, ShouldBeNil)
+
+			var back []product
+			_, err = filtrx.List(ctx, db,
+				From(d, "products").OrderBy("id").
+					Seek(filtrx.SeekParams{Before: info2.StartCursor, Size: 2}),
+				&back)
+			So(err, ShouldBeNil)
+
+			Convey("Then pages seek by cursor and reverse back to the first page", func() {
+				So(ids(page1), ShouldResemble, []int{1, 2})
+				So(info1.Truncated, ShouldBeTrue)
+				So(ids(page2), ShouldResemble, []int{3, 4})
+				So(ids(back), ShouldResemble, []int{1, 2})
 			})
 		})
 
