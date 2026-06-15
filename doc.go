@@ -30,12 +30,17 @@
 //
 // A filter struct may declare its FROM table and joins with Table and Join
 // marker fields; filter columns then reference the aliases (col:"u.status").
-// Start such a query with For, which reads the source from the struct.
+// Start such a query with For, which reads the source from the struct. For a
+// one-to-many relationship use an Exists field, which compiles to a correlated
+// EXISTS subquery and so filters the base table without fanning the result out.
 //
 // # Pagination
 //
 // Paginate resolves First/Last/Before/After into a limit and offset and reports
-// whether a pre-count is required; see Paginate and PageInfo.
+// whether a pre-count is required; see Paginate and PageInfo. For deep pages,
+// Query.Seek switches to keyset (cursor) pagination over the query's OrderBy
+// columns, whose per-page cost does not grow with depth; see SeekParams and
+// Cursor.
 //
 // # One-call listing
 //
