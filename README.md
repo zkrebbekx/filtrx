@@ -507,6 +507,14 @@ Because the scope is itself a filter, a soft-deleted `Delete`/`Update` is never
 quoting and the unbounded-`OFFSET` form; the same filter struct works across all
 three.
 
+## Examples
+
+A complete, runnable HTTP server that exercises every feature against real
+PostgreSQL lives in [`examples/`](examples) — `docker compose up --build`, then
+walk the curl tour in its README. It's a filtrx cookbook: one store method per
+feature, from a simple filtered list to joins, `EXISTS`, full-text search,
+grouping and filter-driven CRUD.
+
 ## Testing locally
 
 ```bash
