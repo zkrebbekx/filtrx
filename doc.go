@@ -46,7 +46,7 @@
 //
 // The FullText holder compiles to the dialect's native full-text match
 // (Postgres websearch_to_tsquery, MySQL MATCH/AGAINST, SQLite FTS5) instead of a
-// LIKE scan.
+// LIKE scan; Query.OrderByRelevance ranks the results (Postgres/MySQL).
 //
 // # Grouping
 //
@@ -58,6 +58,11 @@
 // The same filter can drive a write: Query.Delete and Query.Update reuse the
 // compiled WHERE. Both refuse an empty filter unless Query.Unfiltered authorises
 // a whole-table mutation.
+//
+// # Soft deletes
+//
+// Query.SoftDelete scopes every build path to a soft-delete column (live rows by
+// default); WithDeleted and OnlyDeleted widen or narrow that scope.
 //
 // # One-call listing
 //

@@ -103,6 +103,9 @@ func runKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, des
 	if q.seek.size <= 0 {
 		return keysetResult{}, fmt.Errorf("%w: Seek size must be positive", ErrCompile)
 	}
+	if q.hasRelevanceOrder() {
+		return keysetResult{}, fmt.Errorf("%w: keyset pagination cannot order by relevance", ErrCompile)
+	}
 
 	var zero T
 	rowType := reflect.TypeOf(zero)
@@ -121,9 +124,10 @@ func runKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, des
 		}
 	}
 
-	// Seek predicate from the cursor, AND-ed onto the filter. The first page has
-	// no cursor and selects from the start of the order.
-	cond := q.cond
+	// Seek predicate from the cursor, AND-ed onto the filter (with its soft-delete
+	// scope). The first page has no cursor and selects from the start of the order.
+	base := q.effectiveCond()
+	cond := base
 	if q.seek.cursor != "" {
 		vals, err := decodeCursor(q.seek.cursor)
 		if err != nil {
@@ -132,7 +136,7 @@ func runKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, des
 		if len(vals) != len(q.order) {
 			return keysetResult{}, fmt.Errorf("%w: cursor carries %d values but the query orders by %d columns", ErrCompile, len(vals), len(q.order))
 		}
-		cond = And(q.cond, keysetCond(q.order, vals, q.seek.before))
+		cond = And(base, keysetCond(q.order, vals, q.seek.before))
 	}
 	where, whereArgs := Build(cond, q.dialect)
 
@@ -212,7 +216,7 @@ func runKeyset[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, des
 	}
 
 	if q.seek.total {
-		baseWhere, baseArgs := Build(q.cond, q.dialect)
+		baseWhere, baseArgs := Build(q.effectiveCond(), q.dialect)
 		n, cerr := count(ctx, db, q, baseWhere, baseArgs)
 		if cerr != nil {
 			return keysetResult{}, cerr
@@ -236,7 +240,7 @@ func (q *Query) buildKeysetSelect(where string, whereArgs []any, order []orderTe
 		sb.WriteString(where)
 	}
 	args := q.writeGroupHaving(&sb, whereArgs)
-	q.writeOrder(&sb, order)
+	args = append(args, q.writeOrder(&sb, order, len(args))...)
 	sb.WriteString(" LIMIT ")
 	sb.WriteString(q.dialect.placeholder(len(args) + 1))
 	return sb.String(), append(args, limit)

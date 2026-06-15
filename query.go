@@ -22,23 +22,42 @@ var defaultMapper = reflectx.NewMapper("db")
 // filter, ordering and paging. Build one with From and the chaining methods,
 // then pass it to List. The zero dialect is Postgres; set another with On.
 type Query struct {
-	from       *sourceSpec
-	columns    []string
-	cond       Cond
-	groupBy    []string
-	having     Cond
-	order      []orderTerm
-	paging     PagingParams
-	seek       *seekState
-	dialect    Dialect
-	unfiltered bool
-	err        error
+	from          *sourceSpec
+	columns       []string
+	cond          Cond
+	groupBy       []string
+	having        Cond
+	order         []orderTerm
+	paging        PagingParams
+	seek          *seekState
+	dialect       Dialect
+	unfiltered    bool
+	softDeleteCol string
+	softScope     softScope
+	err           error
 }
+
+// softScope selects which rows a soft-delete column admits.
+type softScope int
+
+const (
+	scopeActive      softScope = iota // only rows with a NULL soft-delete column
+	scopeWithDeleted                  // all rows, ignoring the soft-delete column
+	scopeOnlyDeleted                  // only rows with a non-NULL soft-delete column
+)
 
 type orderTerm struct {
 	col   string
 	desc  bool
 	nulls nullsPos
+	rank  *rankSpec // when set, order by full-text relevance, not the column
+}
+
+// rankSpec is a full-text relevance ordering: the search string (bound as a
+// parameter) and the Postgres text-search config.
+type rankSpec struct {
+	query  string
+	config string
 }
 
 // nullsPos is where NULLs sort within an order term. The default leaves the
@@ -150,6 +169,18 @@ func (q *Query) OrderByNulls(col string, desc, first bool) *Query {
 	return q
 }
 
+// OrderByRelevance appends a full-text relevance sort of col against the search
+// string query, most-relevant first. It pairs with a FullText filter on the same
+// column: Postgres ranks with ts_rank over websearch_to_tsquery, MySQL with the
+// MATCH ... AGAINST score. The query binds as a parameter. SQLite has no portable
+// relevance expression, so the query errors on it; relevance is also incompatible
+// with Seek (a rank is not a stable cursor key). The Postgres config defaults to
+// english.
+func (q *Query) OrderByRelevance(col, query string) *Query {
+	q.order = append(q.order, orderTerm{col: col, desc: true, rank: &rankSpec{query: query, config: "english"}})
+	return q
+}
+
 // Sort appends ordering parsed from a request, safely. spec is a comma-separated
 // list of sort keys such as "name,-created"; a leading "-" means descending. Only
 // keys present in allowed are accepted, and the mapped value is the real column —
@@ -217,6 +248,58 @@ func (q *Query) On(d Dialect) *Query {
 	return q
 }
 
+// SoftDelete scopes the query to a soft-delete column: by default only rows whose
+// col IS NULL (the live rows) are admitted, transparently, across List, Count,
+// Seek, Delete and Update. Override the scope with WithDeleted or OnlyDeleted.
+//
+//	q.SoftDelete("deleted_at") // adds "deleted_at" IS NULL to the WHERE
+func (q *Query) SoftDelete(col string) *Query {
+	q.softDeleteCol = col
+	q.softScope = scopeActive
+	return q
+}
+
+// WithDeleted widens a SoftDelete scope to include every row, ignoring the
+// soft-delete column. It has no effect without SoftDelete.
+func (q *Query) WithDeleted() *Query {
+	q.softScope = scopeWithDeleted
+	return q
+}
+
+// OnlyDeleted narrows a SoftDelete scope to the soft-deleted rows alone (the
+// column IS NOT NULL). It has no effect without SoftDelete.
+func (q *Query) OnlyDeleted() *Query {
+	q.softScope = scopeOnlyDeleted
+	return q
+}
+
+// hasRelevanceOrder reports whether any order term sorts by full-text relevance.
+func (q *Query) hasRelevanceOrder() bool {
+	for _, o := range q.order {
+		if o.rank != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveCond is the query's filter combined with its soft-delete scope. Every
+// build path (List, Count, Seek, Delete, Update) uses it instead of q.cond, so
+// the scope applies uniformly.
+func (q *Query) effectiveCond() Cond {
+	if q.softDeleteCol == "" || q.softScope == scopeWithDeleted {
+		return q.cond
+	}
+	scope := IsNull(q.softDeleteCol)
+	if q.softScope == scopeOnlyDeleted {
+		scope = IsNotNull(q.softDeleteCol)
+	}
+	if q.cond == nil {
+		return scope
+	}
+	return And(q.cond, scope)
+}
+
 // List runs the query and pagination as one operation, scanning rows into dest
 // and returning a PageInfo. When the request asks for a total (IncludeTotal, or
 // any Last request) it is obtained from COUNT(*) OVER() in the same statement —
@@ -232,8 +315,11 @@ func List[T any](ctx context.Context, db sqlx.QueryerContext, q *Query, dest *[]
 	if q.seek != nil {
 		return listKeyset(ctx, db, q, dest)
 	}
+	if q.hasRelevanceOrder() && !q.dialect.supportsRelevance() {
+		return PageInfo{}, fmt.Errorf("%w: this dialect does not support relevance ordering", ErrCompile)
+	}
 
-	where, whereArgs := Build(q.cond, q.dialect)
+	where, whereArgs := Build(q.effectiveCond(), q.dialect)
 	paginator, needsTotal := Paginate(q.paging)
 
 	var info PageInfo
@@ -300,7 +386,7 @@ func (q *Query) Count(ctx context.Context, db sqlx.QueryerContext) (int, error) 
 	if q.err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrCompile, q.err)
 	}
-	where, args := Build(q.cond, q.dialect)
+	where, args := Build(q.effectiveCond(), q.dialect)
 	return count(ctx, db, q, where, args)
 }
 
@@ -458,19 +544,32 @@ func (q *Query) hasGrouping() bool {
 }
 
 // writeOrder appends an ORDER BY clause for the given terms, quoting each column
-// per the dialect and applying any explicit NULL placement. It writes nothing
-// for an empty term list.
-func (q *Query) writeOrder(sb *strings.Builder, order []orderTerm) {
+// per the dialect and applying any explicit NULL placement. A relevance term
+// renders a dialect rank expression and binds its query string, so it returns the
+// arguments it bound (numbered from startN). It writes nothing for an empty list.
+func (q *Query) writeOrder(sb *strings.Builder, order []orderTerm, startN int) []any {
 	if len(order) == 0 {
-		return
+		return nil
 	}
 	sb.WriteString(" ORDER BY ")
+	var args []any
+	n := startN
 	for i, o := range order {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
+		if o.rank != nil {
+			n++
+			sb.WriteString(q.dialect.rankExpr(q.dialect.quoteIdent(o.col), o.rank.config, q.dialect.placeholder(n)))
+			if o.desc {
+				sb.WriteString(" DESC")
+			}
+			args = append(args, o.rank.query)
+			continue
+		}
 		sb.WriteString(orderClause(q.dialect, q.dialect.quoteIdent(o.col), o.desc, o.nulls))
 	}
+	return args
 }
 
 func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, window bool) (string, []any) {
@@ -488,7 +587,7 @@ func (q *Query) buildSelect(where string, whereArgs []any, limit, offset int, wi
 		sb.WriteString(where)
 	}
 	args := q.writeGroupHaving(&sb, whereArgs)
-	q.writeOrder(&sb, q.order)
+	args = append(args, q.writeOrder(&sb, q.order, len(args))...)
 	n := len(args)
 	switch {
 	case limit > 0:

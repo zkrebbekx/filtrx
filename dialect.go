@@ -30,6 +30,13 @@ type Dialect interface {
 	// configuration (ignored elsewhere). The search string is always a bind
 	// parameter; only the column and config reach the SQL text.
 	fullTextMatch(quotedCol, config, placeholder string) string
+	// supportsRelevance reports whether the dialect can express a full-text
+	// relevance ordering (OrderByRelevance). Postgres and MySQL can; SQLite cannot
+	// portably.
+	supportsRelevance() bool
+	// rankExpr renders a full-text relevance expression for ORDER BY, scoring the
+	// quoted column against the search string bound at placeholder.
+	rankExpr(quotedCol, config, placeholder string) string
 }
 
 // Postgres targets PostgreSQL: numbered $1 placeholders and double-quoted
@@ -54,6 +61,10 @@ func (postgres) fullTextMatch(col, config, ph string) string {
 	// syntax, so the search string is safe to pass straight through.
 	return col + " @@ websearch_to_tsquery('" + config + "', " + ph + ")"
 }
+func (postgres) supportsRelevance() bool { return true }
+func (postgres) rankExpr(col, config, ph string) string {
+	return "ts_rank(" + col + ", websearch_to_tsquery('" + config + "', " + ph + "))"
+}
 
 type mysql struct{}
 
@@ -63,6 +74,10 @@ func (mysql) supportsWindowCount() bool   { return true }
 func (mysql) allRowsLimit() string        { return "18446744073709551615" }
 func (mysql) supportsNullsOrdering() bool { return false }
 func (mysql) fullTextMatch(col, _, ph string) string {
+	return "MATCH(" + col + ") AGAINST(" + ph + " IN NATURAL LANGUAGE MODE)"
+}
+func (mysql) supportsRelevance() bool { return true }
+func (mysql) rankExpr(col, _, ph string) string {
 	return "MATCH(" + col + ") AGAINST(" + ph + " IN NATURAL LANGUAGE MODE)"
 }
 
@@ -76,6 +91,11 @@ func (sqlite) supportsNullsOrdering() bool { return true }
 func (sqlite) fullTextMatch(col, _, ph string) string {
 	// SQLite FTS5: the column (an FTS5 table/column) matches the query directly.
 	return col + " MATCH " + ph
+}
+func (sqlite) supportsRelevance() bool { return false }
+func (sqlite) rankExpr(col, _, _ string) string {
+	// Unreachable: OrderByRelevance is rejected for SQLite before any SQL is built.
+	return col
 }
 
 // orderClause renders one ORDER BY term: the quoted column, direction, and any

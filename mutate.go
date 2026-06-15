@@ -41,7 +41,7 @@ func (q *Query) Delete(ctx context.Context, db sqlx.ExecerContext) (int64, error
 	if err := q.singleTable(); err != nil {
 		return 0, err
 	}
-	where, args := Build(q.cond, q.dialect)
+	where, args := Build(q.effectiveCond(), q.dialect)
 	if where == "" && !q.unfiltered {
 		return 0, fmt.Errorf("%w: Delete has no filter; call Unfiltered to delete every row", ErrCompile)
 	}
@@ -74,7 +74,8 @@ func (q *Query) Update(ctx context.Context, db sqlx.ExecerContext, set map[strin
 	if len(set) == 0 {
 		return 0, fmt.Errorf("%w: Update needs at least one column to set", ErrCompile)
 	}
-	where, whereArgs := Build(q.cond, q.dialect)
+	cond := q.effectiveCond()
+	where, whereArgs := Build(cond, q.dialect)
 	if where == "" && !q.unfiltered {
 		return 0, fmt.Errorf("%w: Update has no filter; call Unfiltered to update every row", ErrCompile)
 	}
@@ -101,7 +102,7 @@ func (q *Query) Update(ctx context.Context, db sqlx.ExecerContext, set map[strin
 	}
 	if where != "" {
 		// Re-render the WHERE so its placeholders follow the SET assignments.
-		where, whereArgs = buildAt(q.cond, q.dialect, len(cols))
+		where, whereArgs = buildAt(cond, q.dialect, len(cols))
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
