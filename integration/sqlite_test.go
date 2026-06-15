@@ -22,4 +22,5 @@ func TestSQLite(t *testing.T) {
 
 	runSuite(t, db, filtrx.SQLite)
 	runMutations(t, db, filtrx.SQLite)
+	runSoftDelete(t, db, filtrx.SQLite)
 }

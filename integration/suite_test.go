@@ -51,11 +51,12 @@ func setupSchema(ctx context.Context, t *testing.T, db *sqlx.DB) {
 	t.Helper()
 	db.MustExecContext(ctx, `DROP TABLE IF EXISTS products`)
 	db.MustExecContext(ctx, `CREATE TABLE products (
-		id       INTEGER PRIMARY KEY,
-		name     VARCHAR(255) NOT NULL,
-		category VARCHAR(255) NOT NULL,
-		price    INTEGER NOT NULL,
-		in_stock INTEGER NOT NULL
+		id         INTEGER PRIMARY KEY,
+		name       VARCHAR(255) NOT NULL,
+		category   VARCHAR(255) NOT NULL,
+		price      INTEGER NOT NULL,
+		in_stock   INTEGER NOT NULL,
+		deleted_at TIMESTAMP NULL
 	)`)
 	for _, p := range seed {
 		db.MustExecContext(ctx, db.Rebind(
@@ -401,6 +402,46 @@ func runMutations(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
 	Convey("Given a delete with no filter, it is refused", t, func() {
 		_, err := From(d, "categories").Delete(ctx, db)
 		So(err, ShouldNotBeNil)
+	})
+}
+
+// runSoftDelete exercises the SoftDelete scope against a real engine. It reseeds,
+// soft-deletes the food category, then checks the three scopes. The soft-delete
+// UPDATE sits in the closure body (re-run per leaf, idempotent) so each scope
+// leaf sees the same state.
+func runSoftDelete(t *testing.T, db *sqlx.DB, d filtrx.Dialect) {
+	ctx := context.Background()
+	setupSchema(ctx, t, db)
+
+	Convey("Given the food products are soft-deleted", t, func() {
+		_, err := From(d, "products").
+			Where(productFilter{Category: filtrx.Text{Eq: filtrx.Some("food")}}).
+			Update(ctx, db, map[string]any{"deleted_at": "2026-01-01 00:00:00"})
+		So(err, ShouldBeNil)
+
+		Convey("When listing with the default active scope", func() {
+			var got []product
+			_, err := filtrx.List(ctx, db,
+				From(d, "products").SoftDelete("deleted_at").OrderBy("id"), &got)
+			So(err, ShouldBeNil)
+			So(ids(got), ShouldResemble, []int{1, 2, 3}) // tools survive
+		})
+
+		Convey("When listing OnlyDeleted", func() {
+			var got []product
+			_, err := filtrx.List(ctx, db,
+				From(d, "products").SoftDelete("deleted_at").OnlyDeleted().OrderBy("id"), &got)
+			So(err, ShouldBeNil)
+			So(ids(got), ShouldResemble, []int{4, 5, 6}) // the soft-deleted food
+		})
+
+		Convey("When listing WithDeleted", func() {
+			var got []product
+			_, err := filtrx.List(ctx, db,
+				From(d, "products").SoftDelete("deleted_at").WithDeleted().OrderBy("id"), &got)
+			So(err, ShouldBeNil)
+			So(ids(got), ShouldResemble, []int{1, 2, 3, 4, 5, 6})
+		})
 	})
 }
 

@@ -43,4 +43,5 @@ func TestPostgres(t *testing.T) {
 
 	runSuite(t, db, filtrx.Postgres)
 	runMutations(t, db, filtrx.Postgres)
+	runSoftDelete(t, db, filtrx.Postgres)
 }

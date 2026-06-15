@@ -178,6 +178,19 @@ filtrx.Where(ArticleFilter{Body: filtrx.FullText{Query: filtrx.Some("fast car")}
 The Postgres text-search configuration defaults to `english`; set another with
 `FullText{Config: "french"}`. It is developer-set, never request input.
 
+Order by relevance with `OrderByRelevance(col, query)` (most relevant first) —
+Postgres ranks with `ts_rank`, MySQL with the `MATCH … AGAINST` score:
+
+```go
+q := filtrx.From("articles").
+	Where(ArticleFilter{Body: filtrx.FullText{Query: filtrx.Some(term)}}).
+	OrderByRelevance("search_vec", term).
+	Page(page)
+```
+
+SQLite has no portable relevance expression, so it errors there; relevance is
+also incompatible with `Seek` (a rank is not a stable cursor key).
+
 ### Nesting
 
 `group:"and"` / `group:"or"` fields hold child filters and bracket exactly:
@@ -466,6 +479,26 @@ n, err = filtrx.From("users").
   `.Unfiltered()`.
 - They take a `sqlx.ExecerContext` (`*sqlx.DB`, `*sqlx.Tx`, `*sqlx.Conn`) and
   return the affected-row count.
+
+## Soft deletes
+
+`SoftDelete(col)` scopes a query to a soft-delete column — by default only live
+rows (`col IS NULL`) — transparently across `List`, `Count`, `Seek`, `Delete` and
+`Update`:
+
+```go
+q := filtrx.From("users").Where(f).SoftDelete("deleted_at") // adds "deleted_at" IS NULL
+```
+
+Widen or narrow the scope with `WithDeleted()` (every row) or `OnlyDeleted()`
+(`col IS NOT NULL`):
+
+```go
+filtrx.From("users").SoftDelete("deleted_at").OnlyDeleted() // the trash
+```
+
+Because the scope is itself a filter, a soft-deleted `Delete`/`Update` is never
+"unfiltered" — it only touches the rows the scope admits.
 
 ## Dialects
 

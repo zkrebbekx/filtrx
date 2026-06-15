@@ -37,4 +37,5 @@ func TestMySQL(t *testing.T) {
 
 	runSuite(t, db, filtrx.MySQL)
 	runMutations(t, db, filtrx.MySQL)
+	runSoftDelete(t, db, filtrx.MySQL)
 }
