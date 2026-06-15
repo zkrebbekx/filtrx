@@ -125,8 +125,10 @@ func listUsers(w http.ResponseWriter, r *http.Request) {
 
 Query-parameter conventions: `status=active` (equality), `age_gte=18&age_lt=65`
 (range), `role=admin&role=mod` or `role=admin,mod` (IN), `active=true` (scalar
-`Opt`). Pagination: `first` / `last` / `after` / `before` / `total`. Unknown
-parameters are ignored, so everything coexists in one query string.
+`Opt`). Offset pagination via `BindPage`: `first` / `last` / `after` / `before` /
+`total`; keyset pagination via `BindSeek`: `after` / `before` (cursors) / `size` /
+`total`. Unknown parameters are ignored, so everything coexists in one query
+string.
 
 ## Filtering
 
@@ -188,6 +190,17 @@ cond := filtrx.And(
 	filtrx.Raw("tags @> ?", pq.Array([]string{"go"})), // escape hatch
 )
 sql, args := filtrx.Build(cond, filtrx.Postgres)
+```
+
+### PostgreSQL array & JSON operators
+
+`Contains` (`@>`), `ContainedBy` (`<@`) and `Overlaps` (`&&`) cover JSON/array
+containment and overlap; the same words work as `op` tags
+(`op:"contains"`/`"containedby"`/`"overlaps"`). These are PostgreSQL-specific, and
+array values need a driver wrapper (`pq.Array`):
+
+```go
+filtrx.Overlaps("roles", pq.Array([]string{"admin", "mod"})) // "roles" && $1
 ```
 
 ## Joins
@@ -352,10 +365,59 @@ ORDER BY "created_at" DESC, "id" LIMIT $4
 - **Mixed `ASC`/`DESC` is fine.** The seek predicate expands to a portable
   lexicographic `OR`-of-`AND` rather than a row-value comparison, so directions
   can differ per column across Postgres, MySQL and SQLite.
-- **Keyset key columns must be `NOT NULL`** and form a total order (end with a
-  unique column). NULLs have no portable seek semantics, so they're rejected.
 - Keyset doesn't compute a total by default (that's the point); set
   `IncludeTotal` to pay one extra `COUNT`.
+- End the ordering with a unique column so the key is a **total order**.
+
+**Nullable key columns.** A plain `OrderBy` key must be `NOT NULL` — NULL has no
+single portable sort position. To page over a nullable column, declare where its
+NULLs sort with `OrderByNulls(col, desc, nullsFirst)`; filtrx then emits the
+right `NULLS FIRST`/`LAST` (emulated with `ISNULL()` on MySQL) and a seek
+predicate that handles the NULL boundary:
+
+```go
+q := filtrx.From("tasks").
+	OrderByNulls("due_at", false, false). // ASC, NULLs last
+	OrderBy("id").
+	Seek(filtrx.SeekParams{Size: 20})
+```
+
+### GraphQL: Relay connections
+
+`ListConnection` runs a `Seek` query and returns a ready Relay `Connection[T]` —
+edges with per-row cursors and a `PageInfo{hasNextPage,hasPreviousPage,…}` — so a
+GraphQL resolver returns it without translation. From the wire, `BindSeek` reads
+`?after=<cursor>&size=20`:
+
+```go
+seek, _ := filtrx.BindSeek(r.URL.Query())
+q := filtrx.From("events").OrderByDesc("created_at").OrderBy("id").Seek(seek)
+conn, err := filtrx.ListConnection[Event](ctx, db, q)
+// conn.Edges[i].{Node,Cursor}, conn.PageInfo, conn.TotalCount
+```
+
+## Grouping & aggregates
+
+`GroupBy` and `Having` add aggregate queries on top of the same filter, paging
+and fast-total machinery. The window total counts **groups**, and `Count` wraps
+the grouped result, so pagination stays accurate:
+
+```go
+q := filtrx.From("orders").
+	Select("customer_id", "SUM(total) AS total").
+	Where(orderFilter).
+	GroupBy("customer_id").
+	Having(filtrx.Raw("SUM(total) > ?", 10000)). // use Raw for aggregates
+	OrderByDesc("total").
+	Page(filtrx.PagingParams{First: ptr(20), IncludeTotal: true})
+
+var rows []CustomerTotal
+info, err := filtrx.List(ctx, db, q, &rows) // info.Total = number of groups
+```
+
+A `Having` over a plain grouped column can use the ordinary constructors
+(`filtrx.Gt("price", 100)`); for an aggregate expression, which must not be
+quoted as an identifier, use `filtrx.Raw`.
 
 ## Dialects
 

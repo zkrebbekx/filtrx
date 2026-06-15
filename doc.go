@@ -40,7 +40,14 @@
 // whether a pre-count is required; see Paginate and PageInfo. For deep pages,
 // Query.Seek switches to keyset (cursor) pagination over the query's OrderBy
 // columns, whose per-page cost does not grow with depth; see SeekParams and
-// Cursor.
+// Cursor. A nullable key column needs an explicit NULL placement via
+// OrderByNulls. ListConnection assembles a keyset page into a GraphQL Relay
+// Connection, and BindSeek reads its arguments from a query string.
+//
+// # Grouping
+//
+// Query.GroupBy and Query.Having add aggregate queries; the fast total then
+// counts groups, and Count wraps the grouped result, so pagination stays exact.
 //
 // # One-call listing
 //

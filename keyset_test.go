@@ -46,12 +46,15 @@ func TestCursorRoundTrip(t *testing.T) {
 		})
 	})
 
-	Convey("Given a NULL boundary value", t, func() {
-		Convey("When encoded", func() {
-			_, err := encodeCursor([]any{nil})
-			Convey("Then it is rejected: keyset columns must be NOT NULL", func() {
-				So(err, ShouldNotBeNil)
-				So(err.Error(), ShouldContainSubstring, "NOT NULL")
+	Convey("Given a NULL boundary value (a nullable keyset column)", t, func() {
+		Convey("When encoded and decoded", func() {
+			cur, err := encodeCursor([]any{nil, int64(7)})
+			So(err, ShouldBeNil)
+			out, derr := decodeCursor(cur)
+			Convey("Then the NULL round-trips as a nil value", func() {
+				So(derr, ShouldBeNil)
+				So(out[0], ShouldBeNil)
+				So(out[1], ShouldEqual, int64(7))
 			})
 		})
 	})

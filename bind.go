@@ -83,6 +83,37 @@ func BindPage(values url.Values) (PagingParams, error) {
 	return p, nil
 }
 
+// BindSeek reads keyset pagination arguments from a query string into SeekParams,
+// for the cursor-based paging exposed by Query.Seek. It recognises after and
+// before (opaque cursors), size (the page size, an integer) and total (a bool,
+// also accepted as include_total). Absent parameters leave their fields zero, so
+// the result is safe to pass straight to Query.Seek. Note that after/before are
+// cursors here, not the integer offsets BindPage reads — a handler uses one or
+// the other depending on which paging style it offers. A non-integer size returns
+// an error.
+func BindSeek(values url.Values) (SeekParams, error) {
+	var p SeekParams
+	if raw, ok := first(values, "after"); ok {
+		p.After = Cursor(raw)
+	}
+	if raw, ok := first(values, "before"); ok {
+		p.Before = Cursor(raw)
+	}
+	if raw, ok := first(values, "size"); ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return SeekParams{}, fmt.Errorf("filtrx: bind seek %q: %w", "size", err)
+		}
+		p.Size = n
+	}
+	if raw, ok := first(values, "total"); ok {
+		p.IncludeTotal = truthy(raw)
+	} else if raw, ok := first(values, "include_total"); ok {
+		p.IncludeTotal = truthy(raw)
+	}
+	return p, nil
+}
+
 func truthy(s string) bool {
 	b, err := strconv.ParseBool(s)
 	return err == nil && b

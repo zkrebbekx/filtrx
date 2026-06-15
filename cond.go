@@ -34,10 +34,17 @@ func (b *builder) bind(v any) string {
 // WHERE keyword) and its ordered bind arguments, using d for placeholders and
 // identifier quoting. A nil Cond yields an empty string and no arguments.
 func Build(c Cond, d Dialect) (sql string, args []any) {
+	return buildAt(c, d, 0)
+}
+
+// buildAt is Build with a starting placeholder offset, so a second clause (a
+// HAVING after a WHERE) can continue the same $N numbering on Postgres rather
+// than restarting at $1.
+func buildAt(c Cond, d Dialect, start int) (sql string, args []any) {
 	if c == nil {
 		return "", nil
 	}
-	b := &builder{d: d}
+	b := &builder{d: d, n: start}
 	c.write(b)
 	return b.sql.String(), b.args
 }
@@ -59,22 +66,31 @@ const (
 	opNotIn op = "NOT IN"
 	opNull  op = "IS NULL"
 	opNNull op = "IS NOT NULL"
+	// Postgres JSON/array operators. The bound value is a single argument (a JSON
+	// document, or an array the driver renders — e.g. pq.Array). Portable only on
+	// PostgreSQL.
+	opContains    op = "@>"
+	opContainedBy op = "<@"
+	opOverlaps    op = "&&"
 )
 
 // opWords maps the words accepted in `op:"..."` tags to operators.
 var opWords = map[string]op{
-	"eq":    opEq,
-	"ne":    opNe,
-	"gt":    opGt,
-	"lt":    opLt,
-	"gte":   opGte,
-	"lte":   opLte,
-	"like":  opLike,
-	"ilike": opILike,
-	"in":    opIn,
-	"nin":   opNotIn,
-	"null":  opNull,
-	"nnull": opNNull,
+	"eq":          opEq,
+	"ne":          opNe,
+	"gt":          opGt,
+	"lt":          opLt,
+	"gte":         opGte,
+	"lte":         opLte,
+	"like":        opLike,
+	"ilike":       opILike,
+	"in":          opIn,
+	"nin":         opNotIn,
+	"null":        opNull,
+	"nnull":       opNNull,
+	"contains":    opContains,
+	"containedby": opContainedBy,
+	"overlaps":    opOverlaps,
 }
 
 // cmp is a leaf comparison: column op value. For opIn/opNotIn the value is a
@@ -235,6 +251,17 @@ func IsNotNull(col string) Cond { return leaf{col, opNNull, nil} }
 // the rare predicate filtrx cannot express (a function call, a subquery). The
 // fragment is emitted verbatim, so never build it from untrusted input.
 func Raw(sql string, args ...any) Cond { return raw{sql: sql, args: args} }
+
+// Contains builds "col @> val" (PostgreSQL JSON/array containment). The value is
+// bound as one argument; for array columns wrap it with pq.Array.
+func Contains(col string, val any) Cond { return leaf{col, opContains, val} }
+
+// ContainedBy builds "col <@ val" (PostgreSQL JSON/array containment, reversed).
+func ContainedBy(col string, val any) Cond { return leaf{col, opContainedBy, val} }
+
+// Overlaps builds "col && val" (PostgreSQL array overlap — the two arrays share
+// at least one element).
+func Overlaps(col string, val any) Cond { return leaf{col, opOverlaps, val} }
 
 // compact drops nil children so callers can append conditionally. It allocates a
 // fresh slice rather than reusing the input's backing array, because And/Or take
